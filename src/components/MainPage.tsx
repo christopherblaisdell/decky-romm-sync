@@ -6,20 +6,25 @@ import {
   Field,
   ProgressBarWithInfo,
   DropdownItem,
+  ToggleField,
+  Spinner,
 } from "@decky/ui";
 import {
   testConnection,
-  startSync,
   cancelSync,
   getSyncStats,
   getSettings,
   saveLogLevel,
   fixRetroarchInputDriver,
+  syncPreview,
+  syncApplyDelta,
+  syncCancelPreview,
+  clearSyncCache,
 } from "../api/backend";
 import { getSyncProgress } from "../utils/syncProgress";
 import { getMigrationState, onMigrationChange } from "../utils/migrationStore";
 import { requestSyncCancel } from "../utils/syncManager";
-import type { SyncProgress, SyncStats } from "../types";
+import type { SyncProgress, SyncStats, SyncPreview } from "../types";
 import type { MigrationStatus } from "../api/backend";
 
 type Page = "connection" | "platforms" | "danger" | "downloads" | "bios" | "savesync";
@@ -34,6 +39,8 @@ export const MainPage: FC<MainPageProps> = ({ onNavigate }) => {
   const [syncing, setSyncing] = useState(false);
   const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
   const [status, setStatus] = useState("");
+  const [preview, setPreview] = useState<SyncPreview | null>(null);
+  const [skipPreview, setSkipPreview] = useState(false);
   const [loading, setLoading] = useState(false);
   const [logLevel, setLogLevel] = useState("warn");
   const [retroarchWarning, setRetroarchWarning] = useState<{ warning: boolean; current?: string } | null>(null);
@@ -49,14 +56,14 @@ export const MainPage: FC<MainPageProps> = ({ onNavigate }) => {
     }
   };
 
-  const startPolling = () => {
+  const startPolling = (progressOnly = false) => {
     stopPolling();
     pollRef.current = setInterval(() => {
       // Read directly from module-level store — no async callable, no WebSocket
       const progress = getSyncProgress();
       setSyncProgress(progress);
 
-      if (!progress.running) {
+      if (!progressOnly && !progress.running) {
         stopPolling();
         setSyncing(false);
         setLoading(false);
@@ -99,18 +106,88 @@ export const MainPage: FC<MainPageProps> = ({ onNavigate }) => {
     setLoading(true);
     setSyncing(true);
     setStatus("");
-    setSyncProgress({ running: true, phase: "starting", message: "Starting sync..." });
+    setPreview(null);
+    setSyncProgress({ running: true, phase: "fetching", message: "Fetching library..." });
+    startPolling(true);
     try {
-      await startSync();
-      startPolling();
+      const result = await syncPreview();
+      stopPolling();
+      if (result.success) {
+        if (skipPreview && (result.summary.new_count + result.summary.changed_count + result.summary.remove_count > 0)) {
+          // Auto-apply: skip preview UI
+          setSyncProgress({ running: true, phase: "applying", message: "Applying changes..." });
+          const applyResult = await syncApplyDelta(result.preview_id);
+          if (applyResult.success) {
+            startPolling();
+          } else {
+            setStatus(applyResult.message);
+            setSyncing(false);
+            setLoading(false);
+          }
+        } else if (skipPreview) {
+          // Nothing to sync — show brief status
+          await syncCancelPreview();
+          setStatus("Everything is up to date");
+          setSyncing(false);
+          setLoading(false);
+        } else {
+          setPreview(result);
+          setSyncing(false);
+          setLoading(false);
+        }
+      } else {
+        setStatus(result.message || "Preview failed");
+        setSyncing(false);
+        setLoading(false);
+      }
     } catch {
+      stopPolling();
       setStatus("Failed to start sync");
       setSyncing(false);
       setLoading(false);
     }
   };
 
+  const handleApply = async () => {
+    if (!preview) return;
+    const previewId = preview.preview_id;
+    setPreview(null);
+    setLoading(true);
+    setSyncing(true);
+    setSyncProgress({ running: true, phase: "applying", message: "Applying changes..." });
+    try {
+      const result = await syncApplyDelta(previewId);
+      if (result.success) {
+        startPolling();
+      } else {
+        setStatus(result.message);
+        setSyncing(false);
+        setLoading(false);
+      }
+    } catch {
+      setStatus("Failed to apply sync");
+      setSyncing(false);
+      setLoading(false);
+    }
+  };
+
+  const handleDismiss = async () => {
+    setPreview(null);
+    setStatus("");
+    try {
+      await syncCancelPreview();
+    } catch {
+      // ignore
+    }
+  };
+
   const handleCancel = async () => {
+    if (preview) {
+      await handleDismiss();
+      setSyncing(false);
+      setLoading(false);
+      return;
+    }
     try {
       requestSyncCancel();
       const result = await cancelSync();
@@ -218,24 +295,102 @@ export const MainPage: FC<MainPageProps> = ({ onNavigate }) => {
       </PanelSection>
 
       <PanelSection title="Sync">
-        {!syncing ? (
-          <PanelSectionRow>
-            <ButtonItem
-              layout="below"
-              onClick={handleSync}
-              disabled={loading || connected === false}
-            >
-              Sync Library
-            </ButtonItem>
-          </PanelSectionRow>
+        {preview ? (
+          <>
+            <PanelSectionRow>
+              <Field
+                label="Preview"
+                description={
+                  preview.summary.new_count + preview.summary.changed_count + preview.summary.remove_count === 0
+                    ? "Everything is up to date."
+                    : `${preview.summary.new_count} new, ${preview.summary.changed_count} updated, ${preview.summary.unchanged_count} unchanged` +
+                      (preview.summary.remove_count > 0
+                        ? `\n${preview.summary.remove_count} to remove` +
+                          (preview.summary.disabled_platform_remove_count > 0
+                            ? ` (${preview.summary.disabled_platform_remove_count} from disabled platforms)`
+                            : "")
+                        : "")
+                }
+              />
+            </PanelSectionRow>
+            {preview.summary.new_count + preview.summary.changed_count + preview.summary.remove_count > 0 ? (
+              <>
+                <PanelSectionRow>
+                  <ButtonItem layout="below" onClick={handleApply}>
+                    Apply Sync
+                  </ButtonItem>
+                </PanelSectionRow>
+                <PanelSectionRow>
+                  <ButtonItem layout="below" onClick={handleDismiss}>
+                    Cancel
+                  </ButtonItem>
+                </PanelSectionRow>
+              </>
+            ) : (
+              <PanelSectionRow>
+                <ButtonItem layout="below" onClick={handleDismiss}>
+                  Dismiss
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
+          </>
+        ) : !syncing ? (
+          <>
+            <PanelSectionRow>
+              <ButtonItem
+                layout="below"
+                onClick={handleSync}
+                disabled={loading || connected === false}
+              >
+                Sync Library
+              </ButtonItem>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ToggleField
+                label="Skip Preview"
+                description="Apply changes immediately without preview"
+                checked={skipPreview}
+                onChange={setSkipPreview}
+              />
+            </PanelSectionRow>
+            {stats?.last_sync && (
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="below"
+                  description="Clear cached sync data to re-fetch all platforms"
+                  onClick={async () => {
+                    const result = await clearSyncCache();
+                    setStatus(result.message);
+                    if (statusTimeoutRef.current) clearTimeout(statusTimeoutRef.current);
+                    statusTimeoutRef.current = setTimeout(() => setStatus(""), 8000);
+                    getSyncStats().then(setStats);
+                  }}
+                  disabled={loading || connected === false}
+                >
+                  Force Full Sync
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
+          </>
         ) : (
           <>
-            {syncProgress && (
+            {syncProgress && syncProgress.phase === "applying" ? (
               <PanelSectionRow>
                 <ProgressBarWithInfo
                   indeterminate={progressFraction === undefined}
                   nProgress={progressFraction}
                   sOperationText={formatProgressText(syncProgress)}
+                />
+              </PanelSectionRow>
+            ) : (
+              <PanelSectionRow>
+                <Field
+                  label={
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <Spinner width={16} height={16} />
+                      {syncProgress?.message || "Fetching..."}
+                    </div>
+                  }
                 />
               </PanelSectionRow>
             )}
@@ -246,7 +401,7 @@ export const MainPage: FC<MainPageProps> = ({ onNavigate }) => {
             </PanelSectionRow>
           </>
         )}
-        {status && !syncing && (
+        {status && !syncing && !preview && (
           <PanelSectionRow>
             <Field label={status} />
           </PanelSectionRow>
