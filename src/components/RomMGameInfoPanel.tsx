@@ -14,7 +14,7 @@
  */
 
 import { useState, useEffect, useRef, FC, createElement } from "react";
-import { DialogButton, Focusable, GamepadButton, ScrollPanelGroup } from "@decky/ui";
+import { DialogButton, Focusable } from "@decky/ui";
 // DialogButton is natively focusable by Steam's gamepad engine (unlike Focusable
 // wrappers around non-interactive content, which don't register in this injection
 // context). Style as content sections, not buttons.
@@ -33,6 +33,7 @@ import {
 } from "../api/backend";
 import type { RomMetadata, InstalledRom, BiosStatus, SaveStatus, PendingConflict, Achievement, AchievementProgress, EarnedAchievement } from "../types";
 import { getMigrationState, onMigrationChange } from "../utils/migrationStore";
+import { scrollFocusedToCenter } from "../utils/scrollHelpers";
 
 interface RomMGameInfoPanelProps {
   appId: number;
@@ -349,17 +350,6 @@ export const RomMGameInfoPanel: FC<RomMGameInfoPanelProps> = ({ appId }) => {
     };
   }, [appId]);
 
-  // Force Steam's scroll container to recalculate after content loads.
-  // Double-RAF ensures the browser has painted the expanded content first.
-  useEffect(() => {
-    if (!state.loading && !state.error && state.romId) {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          window.dispatchEvent(new Event("resize"));
-        });
-      });
-    }
-  }, [state.loading, state.error, state.romId]);
 
   // Lazy-load achievements when the achievements tab becomes active
   const achievementsLoadedRef = useRef(false);
@@ -409,7 +399,7 @@ export const RomMGameInfoPanel: FC<RomMGameInfoPanelProps> = ({ appId }) => {
   /** A section with a title and children — uses DialogButton (not Focusable)
    *  because DialogButton is natively focusable by Steam's gamepad engine.
    *  Styled to look like a content section, not a button.
-   *  onFocus → scrollIntoView keeps the section visible when navigated to. */
+   *  Steam's outer scroll container auto-scrolls to focused elements. */
   const section = (key: string, title: string | null, ...children: (ReturnType<typeof createElement> | null)[]) =>
     createElement(DialogButton as any, {
       key,
@@ -424,10 +414,7 @@ export const RomMGameInfoPanel: FC<RomMGameInfoPanelProps> = ({ appId }) => {
         display: "block",
       },
       noFocusRing: false,
-      onFocus: (e: FocusEvent) => {
-        debugLog(`GameInfoPanel section "${key}" focused`);
-        (e.currentTarget as HTMLElement)?.scrollIntoView?.({ behavior: "smooth", block: "center" });
-      },
+      onFocus: scrollFocusedToCenter,
     },
       title ? createElement("div", { className: "romm-panel-section-title" }, title) : null,
       ...children.filter(Boolean),
@@ -963,9 +950,21 @@ export const RomMGameInfoPanel: FC<RomMGameInfoPanelProps> = ({ appId }) => {
             )
           : imgEl;
 
-        return createElement("div", {
+        return createElement(DialogButton as any, {
           key: `cheevo-${a.ra_id}`,
           className: rowClasses,
+          noFocusRing: false,
+          onFocus: scrollFocusedToCenter,
+          style: {
+            background: "transparent",
+            border: "none",
+            padding: 0,
+            textAlign: "left" as const,
+            cursor: "default",
+            display: "flex",
+            alignItems: "center",
+            gap: "12px",
+          },
         },
           badgeElement,
           createElement("div", { className: "romm-cheevo-details" },
@@ -1061,9 +1060,9 @@ export const RomMGameInfoPanel: FC<RomMGameInfoPanelProps> = ({ appId }) => {
       romFileSection,
     );
   } else if (state.activeTab === "achievements") {
-    activeTabContent = achievementsContent
-      ? section("achievements", null, achievementsContent)
-      : null;
+    // Don't wrap in section() — that creates ONE giant focusable element.
+    // Individual rows are now DialogButtons, enabling focus-driven scrolling.
+    activeTabContent = achievementsContent;
   } else if (state.activeTab === "saves") {
     activeTabContent = saveSyncSection;
   } else if (state.activeTab === "bios") {
@@ -1073,21 +1072,12 @@ export const RomMGameInfoPanel: FC<RomMGameInfoPanelProps> = ({ appId }) => {
   return createElement("div", { "data-romm": "true" },
     migrationWarning,
     tabBar,
-    createElement(ScrollPanelGroup as any, {
-      focusable: false,
-      style: { flex: 1, minHeight: 0 },
+    createElement(Focusable as any, {
+      noFocusRing: true,
+      className: "romm-tab-content",
+      style: { paddingBottom: "48px" },
     },
-      createElement(Focusable as any, {
-        noFocusRing: true,
-        actionDescriptionMap: {
-          [GamepadButton.DIR_UP]: "Scroll Up",
-          [GamepadButton.DIR_DOWN]: "Scroll Down",
-        },
-        className: "romm-tab-content",
-        style: { paddingBottom: "48px" },
-      },
-        activeTabContent,
-      ),
+      activeTabContent,
     ),
   );
 };

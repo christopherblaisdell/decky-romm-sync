@@ -32,6 +32,7 @@ import {
   logError,
 } from "../api/backend";
 import { getRommConnectionState } from "../utils/connectionState";
+import { scrollToTop } from "../utils/scrollHelpers";
 import { showConflictResolutionModal } from "./ConflictModal";
 import type { DownloadProgressEvent, DownloadCompleteEvent } from "../types";
 
@@ -622,6 +623,8 @@ export const CustomPlayButton: FC<CustomPlayButtonProps> = ({ appId }) => {
           backgroundSize: "330% 100%",
         }}
         onClick={handlePlay}
+        // @ts-expect-error onFocus works at runtime; not in Decky's DialogButton types
+        onFocus={scrollToTop}
       >
         Play
       </DialogButton>
