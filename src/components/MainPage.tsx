@@ -27,10 +27,10 @@ import { getSyncProgress } from "../utils/syncProgress";
 import { getDownloadState } from "../utils/downloadStore";
 import { getMigrationState, onMigrationChange } from "../utils/migrationStore";
 import { requestSyncCancel } from "../utils/syncManager";
-import type { SyncProgress, SyncStats, SyncPreview, DownloadItem } from "../types";
+import type { SyncProgress, SyncStats, SyncPreview, SyncPreviewSummary, DownloadItem } from "../types";
 import type { MigrationStatus } from "../api/backend";
 
-type Page = "settings" | "platforms" | "data" | "downloads";
+type Page = "settings" | "library" | "data" | "downloads";
 
 interface MainPageProps {
   onNavigate: (page: Page) => void;
@@ -41,6 +41,27 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatChanges(pairs: [number, string][]): string {
+  return pairs.filter(([n]) => n > 0).map(([n, label]) => `${n} ${label}`).join(", ");
+}
+
+function formatPreviewDescription(s: SyncPreviewSummary): string {
+  const sections: string[] = [];
+  const romChanges = formatChanges([[s.new_count, "added"], [s.changed_count, "updated"], [s.remove_count, "removed"]]);
+  if (romChanges) sections.push(`ROMs: ${romChanges}`);
+  const p = s.platform_collection_diff;
+  if (p?.has_changes) {
+    const platChanges = formatChanges([[p.added_count, "added"], [p.removed_count, "removed"]]);
+    if (platChanges) sections.push(`Platforms: ${platChanges}`);
+  }
+  const d = s.collection_diff;
+  if (d?.has_changes) {
+    const collChanges = formatChanges([[d.added.length, "added"], [d.removed.length, "removed"]]);
+    if (collChanges) sections.push(`Collections: ${collChanges}`);
+  }
+  return sections.length > 0 ? sections.join("; ") : "Everything is up to date.";
 }
 
 export const MainPage: FC<MainPageProps> = ({ onNavigate }) => {
@@ -128,7 +149,8 @@ export const MainPage: FC<MainPageProps> = ({ onNavigate }) => {
       const result = await syncPreview();
       stopPolling();
       if (result.success) {
-        if (skipPreview && (result.summary.new_count + result.summary.changed_count + result.summary.remove_count > 0)) {
+        const hasChanges = result.summary.new_count + result.summary.changed_count + result.summary.remove_count > 0 || !!result.summary.collection_diff?.has_changes || !!result.summary.platform_collection_diff?.has_changes;
+        if (skipPreview && hasChanges) {
           // Auto-apply: skip preview UI
           setSyncProgress({ running: true, phase: "applying", message: "Applying changes..." });
           const applyResult = await syncApplyDelta(result.preview_id);
@@ -288,7 +310,11 @@ export const MainPage: FC<MainPageProps> = ({ onNavigate }) => {
             {stats.roms > 0 && (
               <PanelSectionRow>
                 <Field label="Library">
-                  <span style={{ fontSize: "12px" }}>{stats.roms} ROMs · {stats.platforms} platforms</span>
+                  <span style={{ fontSize: "12px" }}>
+                    {stats.roms} ROMs
+                    {stats.platforms > 0 ? ` · ${stats.platforms} platforms` : ""}
+                    {(stats.collections ?? 0) > 0 ? ` · ${stats.collections} collections` : ""}
+                  </span>
                 </Field>
               </PanelSectionRow>
             )}
@@ -350,20 +376,10 @@ export const MainPage: FC<MainPageProps> = ({ onNavigate }) => {
             <PanelSectionRow>
               <Field
                 label="Preview"
-                description={
-                  preview.summary.new_count + preview.summary.changed_count + preview.summary.remove_count === 0
-                    ? "Everything is up to date."
-                    : `${preview.summary.new_count} new, ${preview.summary.changed_count} updated, ${preview.summary.unchanged_count} unchanged` +
-                      (preview.summary.remove_count > 0
-                        ? `\n${preview.summary.remove_count} to remove` +
-                          (preview.summary.disabled_platform_remove_count > 0
-                            ? ` (${preview.summary.disabled_platform_remove_count} from disabled platforms)`
-                            : "")
-                        : "")
-                }
+                description={formatPreviewDescription(preview.summary)}
               />
             </PanelSectionRow>
-            {preview.summary.new_count + preview.summary.changed_count + preview.summary.remove_count > 0 ? (
+            {preview.summary.new_count + preview.summary.changed_count + preview.summary.remove_count > 0 || preview.summary.collection_diff?.has_changes || preview.summary.platform_collection_diff?.has_changes ? (
               <>
                 <PanelSectionRow>
                   <ButtonItem layout="below" onClick={handleApply}>
@@ -490,13 +506,13 @@ export const MainPage: FC<MainPageProps> = ({ onNavigate }) => {
 
       <PanelSection title="Settings">
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => onNavigate("settings")}>
-            Settings
+          <ButtonItem layout="below" onClick={() => onNavigate("library")}>
+            Library
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => onNavigate("platforms")}>
-            Platforms
+          <ButtonItem layout="below" onClick={() => onNavigate("settings")}>
+            Settings
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>

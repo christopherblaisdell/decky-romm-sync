@@ -60,6 +60,7 @@ export interface PluginSettings {
   log_level: "debug" | "info" | "warn" | "error";
   romm_allow_insecure_ssl: boolean;
   retroarch_input_check?: RetroArchInputCheck;
+  collection_create_platform_groups?: boolean;
 }
 
 export interface DownloadItem {
@@ -82,6 +83,14 @@ export interface PlatformSyncSetting {
   sync_enabled: boolean;
 }
 
+export interface CollectionSyncSetting {
+  id: string;
+  name: string;
+  rom_count: number;
+  sync_enabled: boolean;
+  category: "favorites" | "user" | "franchise";
+}
+
 export interface SyncProgress {
   running: boolean;
   phase?: string;
@@ -95,6 +104,7 @@ export interface SyncProgress {
 export interface SyncStats {
   last_sync: string | null;
   platforms: number;
+  collections?: number;
   roms: number;
   total_shortcuts: number;
 }
@@ -121,6 +131,16 @@ export interface SyncPreviewSummary {
   unchanged_count: number;
   remove_count: number;
   disabled_platform_remove_count: number;
+  collection_diff?: {
+    has_changes: boolean;
+    added: string[];
+    removed: string[];
+  };
+  platform_collection_diff?: {
+    has_changes: boolean;
+    added_count: number;
+    removed_count: number;
+  };
 }
 
 export interface SyncPreview {
@@ -140,7 +160,6 @@ export interface SyncApplyData {
   shortcuts: SyncAddItem[];
   changed_shortcuts?: SyncChangedItem[];
   remove_rom_ids: number[];
-  collection_platform_app_ids?: Record<string, number[]>;
   next_step?: number;
   total_steps?: number;
 }

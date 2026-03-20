@@ -7,8 +7,8 @@ import {
 import { useState, FC } from "react";
 import { FaGamepad } from "react-icons/fa";
 import { MainPage } from "./components/MainPage";
-import { ConnectionSettings } from "./components/ConnectionSettings";
-import { PlatformSync } from "./components/PlatformSync";
+import { SettingsPage } from "./components/SettingsPage";
+import { LibraryPage } from "./components/LibraryPage";
 import { DangerZone } from "./components/DangerZone";
 import { DownloadQueue } from "./components/DownloadQueue";
 import { initSyncManager } from "./utils/syncManager";
@@ -18,11 +18,12 @@ import { registerGameDetailPatch, unregisterGameDetailPatch, registerRomMAppId }
 import { registerMetadataPatches, unregisterMetadataPatches, applyAllPlaytime } from "./patches/metadataPatches";
 import { registerLaunchInterceptor, unregisterLaunchInterceptor } from "./utils/launchInterceptor";
 import { getAllMetadataCache, getAppIdRomIdMap, ensureDeviceRegistered, getSaveSyncSettings, getAllPlaytime, getMigrationStatus, logError, logInfo } from "./api/backend";
+import { createOrUpdateCollections, createOrUpdateRomMCollections, clearPlatformCollection, getHostname } from "./utils/collections";
 import { setMigrationStatus } from "./utils/migrationStore";
 import { initSessionManager, destroySessionManager } from "./utils/sessionManager";
 import type { SyncProgress, DownloadProgressEvent, DownloadCompleteEvent } from "./types";
 
-type Page = "main" | "settings" | "platforms" | "data" | "downloads";
+type Page = "main" | "settings" | "library" | "data" | "downloads";
 
 // Module-level page state survives QAM remounts (e.g. after modal close)
 let currentPage: Page = "main";
@@ -33,9 +34,9 @@ const QAMPanel: FC = () => {
 
   switch (page) {
     case "settings":
-      return <ConnectionSettings onBack={() => setPage("main")} />;
-    case "platforms":
-      return <PlatformSync onBack={() => setPage("main")} />;
+      return <SettingsPage onBack={() => setPage("main")} />;
+    case "library":
+      return <LibraryPage onBack={() => setPage("main")} />;
     case "data":
       return <DangerZone onBack={() => setPage("main")} />;
     case "downloads":
@@ -144,6 +145,7 @@ export default definePlugin(() => {
 
   const onSyncComplete = (data: {
     platform_app_ids: Record<string, number[]>;
+    romm_collection_app_ids?: Record<string, number[]>;
     total_games: number;
     cancelled?: boolean;
   }) => {
@@ -162,6 +164,58 @@ export default definePlugin(() => {
       }
     }
 
+    // Create/update platform and RomM Steam collections + clean stale ones
+    (async () => {
+      try {
+        // Create/update platform collections
+        if (data.platform_app_ids && Object.keys(data.platform_app_ids).length > 0) {
+          await createOrUpdateCollections(data.platform_app_ids);
+        }
+
+        if (data.romm_collection_app_ids && Object.keys(data.romm_collection_app_ids).length > 0) {
+          await createOrUpdateRomMCollections(data.romm_collection_app_ids);
+        }
+
+        if (typeof collectionStore !== "undefined") {
+          const hostname = await getHostname();
+          const suffix = ` (${hostname})`;
+
+          // Clean stale platform collections
+          const activePlatforms = new Set(Object.keys(data.platform_app_ids ?? {}));
+          const stalePlatform = collectionStore.userCollections.filter((c) => {
+            if (!c.displayName.startsWith("RomM: ")) return false;
+            const afterPrefix = c.displayName.slice(6);
+            if (afterPrefix.startsWith("[")) return false; // Skip RomM collections
+            if (!c.displayName.endsWith(suffix)) return false; // Only this machine
+            const platformName = afterPrefix.replace(/\s\([^)]+\)$/, "");
+            return !activePlatforms.has(platformName);
+          });
+          for (const c of stalePlatform) {
+            const afterPrefix = c.displayName.slice(6);
+            const platformName = afterPrefix.replace(/\s\([^)]+\)$/, "");
+            logInfo(`Removing stale platform collection "${c.displayName}"`);
+            await clearPlatformCollection(platformName);
+          }
+
+          // Clean stale RomM collection-based collections
+          const activeNames = new Set(Object.keys(data.romm_collection_app_ids ?? {}));
+          const rommCollectionPattern = /^RomM: \[([^\]]+)\]/;
+          const staleRomm = collectionStore.userCollections.filter((c) => {
+            if (!c.displayName.startsWith("RomM: [")) return false;
+            if (!c.displayName.endsWith(suffix)) return false;
+            const match = rommCollectionPattern.exec(c.displayName);
+            return match ? !activeNames.has(match[1]) : false;
+          });
+          for (const c of staleRomm) {
+            logInfo(`Removing stale RomM collection "${c.displayName}"`);
+            await c.Delete();
+          }
+        }
+      } catch (e) {
+        logError(`Failed to manage RomM collections: ${e}`);
+      }
+    })();
+
     // Re-apply playtime to Steam UI (app IDs may have changed after re-sync)
     (async () => {
       try {
@@ -177,7 +231,7 @@ export default definePlugin(() => {
   };
 
   const syncCompleteListener = addEventListener<
-    [{ platform_app_ids: Record<string, number[]>; total_games: number }]
+    [{ platform_app_ids: Record<string, number[]>; romm_collection_app_ids?: Record<string, number[]>; total_games: number }]
   >("sync_complete", onSyncComplete);
 
   const syncApplyListener = initSyncManager();

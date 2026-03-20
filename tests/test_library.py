@@ -286,9 +286,12 @@ class TestGetSyncStats:
             "30": {"app_id": 1003, "name": "Game C", "platform_name": "SNES"},
         }
         plugin._state["last_sync"] = "2025-01-01T00:00:00"
+        plugin.settings["enabled_platforms"] = {"1": True, "2": True}
+        plugin.settings["enabled_collections"] = {"3": True}
 
         stats = await plugin.get_sync_stats()
         assert stats["platforms"] == 2
+        assert stats["collections"] == 1
         assert stats["roms"] == 3
         assert stats["total_shortcuts"] == 3
         assert stats["last_sync"] == "2025-01-01T00:00:00"
@@ -311,6 +314,7 @@ class TestGetSyncStats:
             "10": {"app_id": 1001, "name": "Game A", "platform_name": "N64", "cover_path": ""},
             "20": {"app_id": 1002, "name": "Game B", "platform_name": "SNES", "cover_path": ""},
         }
+        plugin.settings["enabled_platforms"] = {"1": True}  # 1 platform enabled
 
         await plugin.report_removal_results([10])
         stats = await plugin.get_sync_stats()
@@ -968,7 +972,9 @@ class TestSyncPreview:
             {"rom_id": 2, "name": "Game B", "platform_name": "N64", "platform_slug": "n64", "fs_name": "b.z64"},
             {"rom_id": 3, "name": "Game C", "platform_name": "N64", "platform_slug": "n64", "fs_name": "c.z64"},
         ]
-        plugin._sync_service._fetch_and_prepare = AsyncMock(return_value=(all_roms, shortcuts_data, platforms))
+        plugin._sync_service._fetch_and_prepare = AsyncMock(
+            return_value=(all_roms, shortcuts_data, platforms, {}, set())
+        )
         plugin._sync_service._emit_progress = AsyncMock()
 
         # Set up registry: rom 1 unchanged, rom 2 changed name
@@ -1000,7 +1006,9 @@ class TestSyncPreview:
         shortcuts_data = [
             {"rom_id": 1, "name": "Game A", "platform_name": "N64", "platform_slug": "n64", "fs_name": "a.z64"},
         ]
-        plugin._sync_service._fetch_and_prepare = AsyncMock(return_value=(all_roms, shortcuts_data, platforms))
+        plugin._sync_service._fetch_and_prepare = AsyncMock(
+            return_value=(all_roms, shortcuts_data, platforms, {}, set())
+        )
         plugin._sync_service._emit_progress = AsyncMock()
 
         result = await plugin.sync_preview()
@@ -1031,7 +1039,9 @@ class TestSyncPreview:
         shortcuts_data = [
             {"rom_id": 1, "name": "Game A", "platform_name": "N64", "platform_slug": "n64", "fs_name": "a.z64"},
         ]
-        plugin._sync_service._fetch_and_prepare = AsyncMock(return_value=(all_roms, shortcuts_data, platforms))
+        plugin._sync_service._fetch_and_prepare = AsyncMock(
+            return_value=(all_roms, shortcuts_data, platforms, {}, set())
+        )
         plugin._sync_service._emit_progress = AsyncMock()
 
         await plugin.sync_preview()
@@ -1166,7 +1176,7 @@ class TestSyncApplyDelta:
         assert plugin._sync_service._pending_delta is None
 
     @pytest.mark.asyncio
-    async def test_builds_collection_map_from_unchanged(self, plugin, tmp_path):
+    async def test_sync_apply_does_not_include_collection_data(self, plugin, tmp_path):
         from unittest.mock import AsyncMock
 
         import decky
@@ -1201,9 +1211,10 @@ class TestSyncApplyDelta:
 
         emit_calls = [c for c in decky.emit.call_args_list if c[0][0] == "sync_apply"]
         assert len(emit_calls) == 1
-        collection_map = emit_calls[0][0][1]["collection_platform_app_ids"]
-        assert 1001 in collection_map.get("N64", [])
-        assert 1005 in collection_map.get("SNES", [])
+        # Platform collection data is no longer in sync_apply — it's built in report_sync_results
+        # and sent via sync_complete instead.
+        assert "collection_platform_app_ids" not in emit_calls[0][0][1]
+        assert "platform_eligible_rom_ids" not in emit_calls[0][0][1]
 
 
 class TestSyncCancelPreview:

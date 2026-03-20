@@ -14,24 +14,91 @@ import {
   getPlatforms,
   savePlatformSync,
   setAllPlatformsSync,
+  getCollections,
+  saveCollectionSync,
+  setAllCollectionsSync,
+  saveCollectionPlatformGroups,
+  getSettings,
   getFirmwareStatus,
   downloadAllFirmware,
   downloadRequiredFirmware,
   setSystemCore,
 } from "../api/backend";
-import type { PlatformSyncSetting, FirmwarePlatformExt } from "../types";
+import type { PlatformSyncSetting, CollectionSyncSetting, FirmwarePlatformExt } from "../types";
 
-interface PlatformSyncProps {
+const CATEGORY_TITLES: Record<string, string> = {
+  favorites: "Favorites",
+  user: "My Collections",
+  franchise: "Franchise",
+};
+
+function getBiosSummary(requiredCount: number, requiredDone: number, allRequiredDone: boolean, optionalMissing: number, done: number, total: number, allDone: boolean) {
+  if (requiredCount > 0 && allRequiredDone) {
+    return {
+      summaryLabel: `${requiredDone} / ${requiredCount} required`,
+      summaryDescription: optionalMissing > 0 ? `All required ready (${optionalMissing} optional missing)` : "All required ready",
+    };
+  }
+  if (requiredCount > 0) {
+    return {
+      summaryLabel: `${requiredDone} / ${requiredCount} required`,
+      summaryDescription: `${requiredCount - requiredDone} required missing — games may not launch`,
+    };
+  }
+  return {
+    summaryLabel: `${done} / ${total} files`,
+    summaryDescription: allDone ? "All downloaded" : `${total - done} missing`,
+  };
+}
+
+function hashIndicator(hv: boolean | null): string {
+  if (hv === true) return " \u2713";
+  if (hv === false) return " \u26A0";
+  return " \u2014";
+}
+
+function renderCollectionSections(
+  collections: CollectionSyncSetting[],
+  onToggle: (id: string, enabled: boolean) => void,
+) {
+  return (["favorites", "user", "franchise"] as const).map((cat) => {
+    const items = collections.filter((c) => c.category === cat);
+    if (items.length === 0) return null;
+    return (
+      <PanelSection key={cat} title={CATEGORY_TITLES[cat]}>
+        {items.map((collection) => (
+          <PanelSectionRow key={collection.id}>
+            <ToggleField
+              label={collection.name}
+              description={`${collection.rom_count} ROMs`}
+              checked={collection.sync_enabled}
+              onChange={(value: boolean) => onToggle(collection.id, value)}
+            />
+          </PanelSectionRow>
+        ))}
+      </PanelSection>
+    );
+  });
+}
+
+interface LibraryPageProps {
   onBack: () => void;
 }
 
-export const PlatformSync: FC<PlatformSyncProps> = ({ onBack }) => {
-  const [activeTab, setActiveTab] = useState<"sync" | "bios">("sync");
+export const LibraryPage: FC<LibraryPageProps> = ({ onBack }) => {
+  const [activeTab, setActiveTab] = useState<"platforms" | "collections" | "bios">("platforms");
 
-  // --- Sync tab state ---
+  // --- Platforms tab state ---
   const [syncPlatforms, setSyncPlatforms] = useState<PlatformSyncSetting[]>([]);
   const [syncLoading, setSyncLoading] = useState(true);
   const [syncError, setSyncError] = useState(false);
+
+  // --- Collections tab state ---
+  const [collections, setCollections] = useState<CollectionSyncSetting[]>([]);
+  const [collectionsLoading, setCollectionsLoading] = useState(true);
+  const [collectionsError, setCollectionsError] = useState(false);
+  const collectionsLoaded = useRef(false);
+  const [platformGroups, setPlatformGroups] = useState(false);
 
   // --- BIOS tab state ---
   const [biosPlatforms, setBiosPlatforms] = useState<FirmwarePlatformExt[]>([]);
@@ -56,6 +123,25 @@ export const PlatformSync: FC<PlatformSyncProps> = ({ onBack }) => {
       .catch(() => setSyncError(true))
       .finally(() => setSyncLoading(false));
   }, []);
+
+  // Load collections data lazily on first switch to collections tab
+  useEffect(() => {
+    if (activeTab === "collections" && !collectionsLoaded.current) {
+      collectionsLoaded.current = true;
+      Promise.all([
+        getCollections(),
+        getSettings(),
+      ]).then(([collResult, settingsResult]) => {
+        if (collResult.success) {
+          setCollections(collResult.collections);
+        } else {
+          setCollectionsError(true);
+        }
+        setPlatformGroups(!!settingsResult.collection_create_platform_groups);
+      }).catch(() => setCollectionsError(true))
+        .finally(() => setCollectionsLoading(false));
+    }
+  }, [activeTab]);
 
   // Load BIOS data lazily on first switch to BIOS tab
   useEffect(() => {
@@ -82,7 +168,7 @@ export const PlatformSync: FC<PlatformSyncProps> = ({ onBack }) => {
     setBiosLoading(false);
   };
 
-  // --- Sync tab handlers ---
+  // --- Platforms tab handlers ---
   const handleToggle = async (id: number, enabled: boolean) => {
     setSyncPlatforms((prev) =>
       prev.map((p) => (p.id === id ? { ...p, sync_enabled: enabled } : p))
@@ -103,6 +189,30 @@ export const PlatformSync: FC<PlatformSyncProps> = ({ onBack }) => {
       await setAllPlatformsSync(enabled);
     } catch {
       setSyncPlatforms(previous);
+    }
+  };
+
+  // --- Collections tab handlers ---
+  const handleCollectionToggle = async (id: string, enabled: boolean) => {
+    setCollections((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, sync_enabled: enabled } : c))
+    );
+    try {
+      await saveCollectionSync(id, enabled);
+    } catch {
+      setCollections((prev) =>
+        prev.map((c) => (c.id === id ? { ...c, sync_enabled: !enabled } : c))
+      );
+    }
+  };
+
+  const handleSetAllCollections = async (enabled: boolean) => {
+    const previous = collections.map((c) => ({ ...c }));
+    setCollections((prev) => prev.map((c) => ({ ...c, sync_enabled: enabled })));
+    try {
+      await setAllCollectionsSync(enabled, null);
+    } catch {
+      setCollections(previous);
     }
   };
 
@@ -141,6 +251,110 @@ export const PlatformSync: FC<PlatformSyncProps> = ({ onBack }) => {
     setDownloading(null);
   };
 
+  // --- Platforms tab content ---
+  const renderPlatformsContent = () => {
+    if (syncLoading) {
+      return (
+        <PanelSectionRow>
+          <Spinner />
+        </PanelSectionRow>
+      );
+    }
+    if (syncError) {
+      return (
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={onBack}>
+            Failed to load platforms
+          </ButtonItem>
+        </PanelSectionRow>
+      );
+    }
+    return (
+      <>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => handleSetAll(true)}>
+            Enable All
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => handleSetAll(false)}>
+            Disable All
+          </ButtonItem>
+        </PanelSectionRow>
+        {syncPlatforms.map((platform) => (
+          <PanelSectionRow key={platform.id}>
+            <ToggleField
+              label={platform.name}
+              description={`${platform.rom_count} ROMs`}
+              checked={platform.sync_enabled}
+              onChange={(value: boolean) =>
+                handleToggle(platform.id, value)
+              }
+            />
+          </PanelSectionRow>
+        ))}
+      </>
+    );
+  };
+
+  // --- Collections tab content ---
+  const renderCollectionsContent = () => {
+    if (collectionsLoading) {
+      return (
+        <PanelSection title="Collections">
+          <PanelSectionRow><Spinner /></PanelSectionRow>
+        </PanelSection>
+      );
+    }
+    if (collectionsError) {
+      return (
+        <PanelSection title="Collections">
+          <PanelSectionRow>
+            <Field label="Failed to load collections" description="Check your connection and try again" />
+          </PanelSectionRow>
+        </PanelSection>
+      );
+    }
+    if (collections.length === 0) {
+      return (
+        <PanelSection title="Collections">
+          <PanelSectionRow>
+            <Field label="No collections found" description="Create collections in RomM to sync them here" />
+          </PanelSectionRow>
+        </PanelSection>
+      );
+    }
+    return (
+      <>
+        <PanelSection>
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={() => handleSetAllCollections(true)}>
+              Enable All
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={() => handleSetAllCollections(false)}>
+              Disable All
+            </ButtonItem>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ToggleField
+              label="Add to platform collections"
+              description="Include collection games in platform collections"
+              checked={platformGroups}
+              onChange={async (value: boolean) => {
+                setPlatformGroups(value);
+                try { await saveCollectionPlatformGroups(value); } catch { setPlatformGroups(!value); }
+              }}
+            />
+          </PanelSectionRow>
+        </PanelSection>
+        {/* Collection sections by category */}
+        {renderCollectionSections(collections, handleCollectionToggle)}
+      </>
+    );
+  };
+
   // --- BIOS tab: platform rendering ---
   const withGames = biosPlatforms.filter((p) => p.has_games);
   const withoutGames = biosPlatforms.filter((p) => !p.has_games);
@@ -153,36 +367,14 @@ export const PlatformSync: FC<PlatformSyncProps> = ({ onBack }) => {
     const isExpanded = expanded[platform.platform_slug] ?? false;
 
     const requiredFiles = platform.files.filter((f) => f.classification === "required");
-    const optionalFiles = platform.files.filter((f) => f.classification === "optional");
     const unknownFiles = platform.files.filter((f) => f.classification === "unknown");
     const requiredCount = requiredFiles.length;
     const requiredDone = requiredFiles.filter((f) => f.downloaded).length;
     const allRequiredDone = requiredDone === requiredCount;
-    const optionalDone = optionalFiles.filter((f) => f.downloaded).length;
-    const optionalMissing = optionalFiles.length - optionalDone;
+    const optionalMissing = platform.files.filter((f) => f.classification === "optional" && !f.downloaded).length;
 
     const needsAttention = platform.has_games && !allRequiredDone;
-
-    let summaryLabel: string;
-    let summaryDescription: string;
-    if (requiredCount > 0) {
-      if (allRequiredDone) {
-        summaryLabel = `${requiredDone} / ${requiredCount} required`;
-        summaryDescription = optionalMissing > 0
-          ? `All required ready (${optionalMissing} optional missing)`
-          : "All required ready";
-      } else {
-        summaryLabel = `${requiredDone} / ${requiredCount} required`;
-        summaryDescription = `${requiredCount - requiredDone} required missing — games may not launch`;
-      }
-    } else {
-      summaryLabel = `${done} / ${total} files`;
-      summaryDescription = allDone ? "All downloaded" : `${total - done} missing`;
-    }
-
-    const hashIndicator = (hv: boolean | null) =>
-      hv === true ? " \u2713" : hv === false ? " \u26A0" : " \u2014";
-
+    const { summaryLabel, summaryDescription } = getBiosSummary(requiredCount, requiredDone, allRequiredDone, optionalMissing, done, total, allDone);
     const hasRequiredMissing = requiredCount > 0 && !allRequiredDone;
     const hasOptionalMissing = optionalMissing > 0;
 
@@ -210,11 +402,11 @@ export const PlatformSync: FC<PlatformSyncProps> = ({ onBack }) => {
               selectedOption={platform.active_core_label || platform.available_cores.find((c) => c.is_default)?.label || ""}
               onChange={async (option: { data: string }) => {
                 const defaultCore = platform.available_cores?.find((c) => c.is_default);
-                const label = defaultCore && option.data === defaultCore.label ? "" : option.data;
+                const label = option.data === defaultCore?.label ? "" : option.data;
                 const result = await setSystemCore(platform.platform_slug, label);
                 if (result.success) {
                   await refreshBios();
-                  window.dispatchEvent(new CustomEvent("romm_data_changed", { detail: { type: "core_changed", platform_slug: platform.platform_slug } }));
+                  globalThis.dispatchEvent(new CustomEvent("romm_data_changed", { detail: { type: "core_changed", platform_slug: platform.platform_slug } }));
                 }
               }}
             />
@@ -328,10 +520,16 @@ export const PlatformSync: FC<PlatformSyncProps> = ({ onBack }) => {
         style={{ display: "flex", gap: "4px", padding: "0 16px 12px" }}
       >
         <DialogButton
-          style={{ flex: 1, minWidth: 0, padding: "10px 0", opacity: activeTab === "sync" ? 1 : 0.5, borderBottom: activeTab === "sync" ? "2px solid #1a9fff" : "2px solid transparent" }}
-          onClick={() => setActiveTab("sync")}
+          style={{ flex: 1, minWidth: 0, padding: "10px 0", opacity: activeTab === "platforms" ? 1 : 0.5, borderBottom: activeTab === "platforms" ? "2px solid #1a9fff" : "2px solid transparent" }}
+          onClick={() => setActiveTab("platforms")}
         >
-          Sync
+          Platforms
+        </DialogButton>
+        <DialogButton
+          style={{ flex: 1, minWidth: 0, padding: "10px 0", opacity: activeTab === "collections" ? 1 : 0.5, borderBottom: activeTab === "collections" ? "2px solid #1a9fff" : "2px solid transparent" }}
+          onClick={() => setActiveTab("collections")}
+        >
+          Collections
         </DialogButton>
         <DialogButton
           style={{ flex: 1, minWidth: 0, padding: "10px 0", opacity: activeTab === "bios" ? 1 : 0.5, borderBottom: activeTab === "bios" ? "2px solid #1a9fff" : "2px solid transparent" }}
@@ -341,45 +539,16 @@ export const PlatformSync: FC<PlatformSyncProps> = ({ onBack }) => {
         </DialogButton>
       </Focusable>
 
-      {activeTab === "sync" && (
+      {activeTab === "platforms" && (
         <PanelSection title="Platforms">
-          {syncLoading ? (
-            <PanelSectionRow>
-              <Spinner />
-            </PanelSectionRow>
-          ) : syncError ? (
-            <PanelSectionRow>
-              <ButtonItem layout="below" onClick={onBack}>
-                Failed to load platforms
-              </ButtonItem>
-            </PanelSectionRow>
-          ) : (
-            <>
-              <PanelSectionRow>
-                <ButtonItem layout="below" onClick={() => handleSetAll(true)}>
-                  Enable All
-                </ButtonItem>
-              </PanelSectionRow>
-              <PanelSectionRow>
-                <ButtonItem layout="below" onClick={() => handleSetAll(false)}>
-                  Disable All
-                </ButtonItem>
-              </PanelSectionRow>
-              {syncPlatforms.map((platform) => (
-                <PanelSectionRow key={platform.id}>
-                  <ToggleField
-                    label={platform.name}
-                    description={`${platform.rom_count} ROMs`}
-                    checked={platform.sync_enabled}
-                    onChange={(value: boolean) =>
-                      handleToggle(platform.id, value)
-                    }
-                  />
-                </PanelSectionRow>
-              ))}
-            </>
-          )}
+          {renderPlatformsContent()}
         </PanelSection>
+      )}
+
+      {activeTab === "collections" && (
+        <>
+          {renderCollectionsContent()}
+        </>
       )}
 
       {activeTab === "bios" && (
