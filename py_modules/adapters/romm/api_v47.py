@@ -37,3 +37,96 @@ class RommApiV47(RommApiV46):
     def list_roms_by_virtual_collection(self, virtual_id: str, limit: int = 50, offset: int = 0) -> dict:
         encoded_id = urllib.parse.quote(str(virtual_id), safe="")
         return self._client.request(f"/api/roms?virtual_collection_id={encoded_id}&limit={limit}&offset={offset}")
+
+    def list_saves(
+        self,
+        rom_id: int,
+        *,
+        device_id: str | None = None,
+        slot: str | None = None,
+    ) -> list[dict]:
+        """List saves with optional device sync info and slot filtering."""
+        query = f"/api/saves?rom_id={rom_id}"
+        if device_id is not None:
+            query += f"&device_id={device_id}"
+        if slot is not None:
+            query += f"&slot={slot}"
+        result = self._client.request(query)
+        return result if isinstance(result, list) else []
+
+    def upload_save(
+        self,
+        rom_id: int,
+        file_path: str,
+        emulator: str,
+        save_id: int | None = None,
+        *,
+        device_id: str | None = None,
+        slot: str | None = None,
+        overwrite: bool = False,
+    ) -> dict:
+        """Upload a save with optional device tracking and slot assignment.
+
+        Raises RommConflictError on 409 (another device uploaded since last sync).
+        """
+        params = f"rom_id={rom_id}&emulator={urllib.parse.quote(emulator)}"
+        if device_id is not None:
+            params += f"&device_id={device_id}"
+        if slot is not None:
+            params += f"&slot={slot}"
+        if overwrite:
+            params += "&overwrite=true"
+        if save_id is not None:
+            return self._client.upload_multipart(f"/api/saves/{save_id}?{params}", file_path, method="PUT")
+        return self._client.upload_multipart(f"/api/saves?{params}", file_path, method="POST")
+
+    def download_save_content(
+        self,
+        save_id: int,
+        dest_path: str,
+        *,
+        device_id: str | None = None,
+        optimistic: bool = True,
+    ) -> None:
+        """Download save content with optional device sync tracking.
+
+        When device_id is provided, the server records the download.
+        optimistic=True (default) auto-marks device as synced.
+        optimistic=False requires a manual confirm_download() call after.
+        """
+        path = f"/api/saves/{save_id}/content"
+        if device_id is not None:
+            opt = "true" if optimistic else "false"
+            path += f"?device_id={device_id}&optimistic={opt}"
+        self._client.download(path, dest_path)
+
+    def confirm_download(self, save_id: int, device_id: str) -> dict:
+        """Confirm a save download for manual sync (when optimistic=false)."""
+        return self._client.post_json(
+            f"/api/saves/{save_id}/downloaded",
+            {"device_id": device_id},
+        )
+
+    def get_save_summary(self, rom_id: int, device_id: str | None = None) -> dict:
+        """Fetch grouped save summary for a ROM with slot breakdown.
+
+        Uses the dedicated /api/saves/summary endpoint which returns
+        a structured response grouped by slot, unlike the flat list
+        from list_saves.
+        """
+        query = f"/api/saves/summary?rom_id={rom_id}"
+        if device_id is not None:
+            query += f"&device_id={device_id}"
+        return self._client.request(query)
+
+    def register_device(self, name: str, platform: str, client: str, version: str) -> dict:
+        """Register this client as a device via POST /api/devices."""
+        return self._client.post_json(
+            "/api/devices",
+            {
+                "name": name,
+                "platform": platform,
+                "client": client,
+                "version": version,
+            },
+        )
