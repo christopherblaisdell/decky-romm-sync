@@ -107,6 +107,7 @@ interface InfoState {
   activeCoreLabel: string | null;
   activeCoreIsDefault: boolean;
   availableCores: Array<{ core_so: string; label: string; is_default: boolean }>;
+  activeSlot: string | null;
   raId: number | null;
   achievementEarned: number;
   achievementTotal: number;
@@ -219,6 +220,19 @@ function timeoutMs(ms: number): Promise<never> {
   return new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), ms));
 }
 
+/** Fire-and-forget active-slot fetch — kept at module scope to avoid nesting. */
+function refreshActiveSlotInBackground(
+  romId: number,
+  cancelled: () => boolean,
+  setter: React.Dispatch<React.SetStateAction<InfoState>>,
+) {
+  getSaveStatus(romId).then((saveStatus) => {
+    if (!cancelled() && saveStatus && "active_slot" in saveStatus) {
+      setter((prev) => ({ ...prev, activeSlot: saveStatus.active_slot ?? null }));
+    }
+  }).catch(() => {});
+}
+
 /** Fire-and-forget BIOS refresh — kept at module scope to avoid nesting. */
 function refreshBiosInBackground(
   romId: number,
@@ -254,6 +268,7 @@ export const RomMPlaySection: FC<RomMPlaySectionProps> = ({ appId }) => {
     activeCoreLabel: null,
     activeCoreIsDefault: true,
     availableCores: [],
+    activeSlot: "default",
     raId: null,
     achievementEarned: 0,
     achievementTotal: 0,
@@ -296,6 +311,11 @@ export const RomMPlaySection: FC<RomMPlaySectionProps> = ({ appId }) => {
           achievementEarned: cached.achievement_summary?.earned ?? 0,
           achievementTotal: cached.achievement_summary?.total ?? 0,
         }));
+
+        // Background: fetch active_slot from save status (not in cached data)
+        if (cached.save_sync_enabled) {
+          refreshActiveSlotInBackground(romId, () => cancelled, setInfo);
+        }
 
         // Auto-apply SGDB artwork on first visit (fire-and-forget)
         // Only mark as applied after success so transient failures allow retry on next visit
@@ -409,7 +429,7 @@ export const RomMPlaySection: FC<RomMPlaySectionProps> = ({ appId }) => {
       if (detail.rom_id && romIdRef.current && detail.rom_id !== romIdRef.current) return;
       const saveStatus = await getSaveStatus(romId).catch((): SaveStatus | null => null);
       const { status: saveSyncStatus, label: saveSyncLabel } = computeSaveSyncDisplay(saveStatus);
-      setInfo((prev) => ({ ...prev, saveSyncStatus, saveSyncLabel }));
+      setInfo((prev) => ({ ...prev, saveSyncStatus, saveSyncLabel, activeSlot: saveStatus && "active_slot" in saveStatus ? saveStatus.active_slot ?? null : prev.activeSlot }));
       } catch (err) {
         debugLog(`RomMPlaySection: onDataChanged error: ${err}`);
       }
@@ -438,7 +458,7 @@ export const RomMPlaySection: FC<RomMPlaySectionProps> = ({ appId }) => {
           detail: { type: "save_sync", rom_id: romId, has_conflict: hasConflict },
         }));
         const { status: ss, label: sl } = computeSaveSyncDisplay(saveStatus);
-        setInfo((prev) => ({ ...prev, saveSyncStatus: ss, saveSyncLabel: sl }));
+        setInfo((prev) => ({ ...prev, saveSyncStatus: ss, saveSyncLabel: sl, activeSlot: saveStatus && "active_slot" in saveStatus ? saveStatus.active_slot ?? null : prev.activeSlot }));
       } catch (e) {
         debugLog(`RomMPlaySection: lightweight save check error: ${e}`);
       }
@@ -530,7 +550,16 @@ export const RomMPlaySection: FC<RomMPlaySectionProps> = ({ appId }) => {
       const result = await syncRomSaves(info.romId);
       if (result.success) {
         const n = result.synced ?? 0;
-        const label = n === 0 ? "no files updated" : n === 1 ? "1 file updated" : `${n} files updated`;
+        const c = (result as any).conflicts?.length ?? 0;
+        let label: string;
+        if (n === 0) {
+          label = "no files updated";
+        } else if (n === 1) {
+          label = "1 file updated";
+        } else {
+          label = `${n} files updated`;
+        }
+        if (c > 0) label += `, ${c} conflict(s) need resolution`;
         toaster.toast({ title: "RomM Sync", body: `Saves synced (${label})` });
         window.dispatchEvent(new CustomEvent("romm_data_changed", { detail: { type: "save_sync", rom_id: info.romId } }));
         // Refresh save sync status — last_sync_check_at was just set by the backend
@@ -767,7 +796,20 @@ export const RomMPlaySection: FC<RomMPlaySectionProps> = ({ appId }) => {
     );
   }
 
-  // Save Sync moved to dedicated tab — no longer shown here
+  // Save Sync moved to dedicated tab — show legacy slot warning only
+  if (info.activeSlot == null && info.saveSyncEnabled) {
+    infoItems.push(
+      createElement("div", {
+        key: "legacy-slot-warning",
+        className: "romm-info-item",
+      },
+        createElement("div", { className: "romm-info-header" }, "SAVE SYNC"),
+        createElement("div", {
+          style: { fontSize: "11px", color: "#ff8800", marginTop: "4px" },
+        }, "\u26A0 Legacy save slot"),
+      ),
+    );
+  }
 
   // BIOS warning (only when files are missing — OK status moved to tab)
   if (info.biosNeeded && info.biosStatus && info.biosStatus !== "ok") {

@@ -1670,6 +1670,52 @@ class TestUpdateFileSyncState:
         game_state = svc._save_sync_state["saves"]["42"]
         assert game_state["last_synced_core"] == "mgba_libretro"
 
+    def test_writes_last_sync_local_mtime_as_float(self, tmp_path):
+        svc, _ = make_service(tmp_path)
+        save_file = _create_save(tmp_path, system="gba", rom_name="pokemon", content=b"\x00" * 1024)
+        local_path = str(save_file)
+        server_response = _server_save()
+
+        svc._update_file_sync_state("42", "pokemon.srm", server_response, local_path, "gba")
+
+        file_state = svc._save_sync_state["saves"]["42"]["files"]["pokemon.srm"]
+        assert isinstance(file_state["last_sync_local_mtime"], float)
+        assert file_state["last_sync_local_mtime"] == pytest.approx(os.path.getmtime(local_path))
+
+    def test_writes_last_sync_local_size_as_int(self, tmp_path):
+        svc, _ = make_service(tmp_path)
+        save_file = _create_save(tmp_path, system="gba", rom_name="pokemon", content=b"\x00" * 2048)
+        local_path = str(save_file)
+        server_response = _server_save()
+
+        svc._update_file_sync_state("42", "pokemon.srm", server_response, local_path, "gba")
+
+        file_state = svc._save_sync_state["saves"]["42"]["files"]["pokemon.srm"]
+        assert isinstance(file_state["last_sync_local_size"], int)
+        assert file_state["last_sync_local_size"] == 2048
+
+    def test_does_not_write_old_local_mtime_at_last_sync_key(self, tmp_path):
+        svc, _ = make_service(tmp_path)
+        save_file = _create_save(tmp_path, system="gba", rom_name="pokemon")
+        local_path = str(save_file)
+        server_response = _server_save()
+
+        svc._update_file_sync_state("42", "pokemon.srm", server_response, local_path, "gba")
+
+        file_state = svc._save_sync_state["saves"]["42"]["files"]["pokemon.srm"]
+        assert "local_mtime_at_last_sync" not in file_state
+
+    def test_writes_none_for_missing_file(self, tmp_path):
+        svc, _ = make_service(tmp_path)
+        local_path = str(tmp_path / "saves" / "gba" / "missing.srm")
+        server_response = _server_save()
+
+        svc._update_file_sync_state("42", "missing.srm", server_response, local_path, "gba")
+
+        file_state = svc._save_sync_state["saves"]["42"]["files"]["missing.srm"]
+        assert file_state["last_sync_local_mtime"] is None
+        assert file_state["last_sync_local_size"] is None
+
 
 # ---------------------------------------------------------------------------
 # TestPruneOrphanedEdgeCase
@@ -1933,12 +1979,43 @@ class TestSaveSyncSettingsSlotAndCleanup:
         assert result["success"] is True
         assert result["settings"]["default_slot"] == "desktop"
 
-    def test_update_default_slot_empty_string_rejected(self, tmp_path):
+    def test_update_default_slot_empty_string_becomes_none(self, tmp_path):
         svc, _ = make_service(tmp_path)
         svc._save_sync_state["settings"]["save_sync_enabled"] = True
         svc._save_sync_state["settings"]["default_slot"] = "default"
         result = svc.update_save_sync_settings({"default_slot": ""})
-        assert result["settings"]["default_slot"] == "default"
+        assert result["settings"]["default_slot"] is None
+
+    def test_empty_string_becomes_none(self, tmp_path):
+        svc, _ = make_service(tmp_path)
+        val, skip = svc._sanitize_setting("default_slot", "", set())
+        assert val is None
+        assert skip is False
+
+    def test_none_value_passes_through(self, tmp_path):
+        svc, _ = make_service(tmp_path)
+        val, skip = svc._sanitize_setting("default_slot", None, set())
+        assert val is None
+        assert skip is False
+
+    def test_whitespace_only_becomes_none(self, tmp_path):
+        svc, _ = make_service(tmp_path)
+        val, skip = svc._sanitize_setting("default_slot", "   ", set())
+        assert val is None
+        assert skip is False
+
+    def test_nonempty_string_trimmed(self, tmp_path):
+        svc, _ = make_service(tmp_path)
+        val, skip = svc._sanitize_setting("default_slot", "  desktop  ", set())
+        assert val == "desktop"
+        assert skip is False
+
+    def test_upload_uses_none_slot_when_active_slot_is_none(self, tmp_path):
+        """When active_slot key is present but value is None, .get() returns None (legacy mode)."""
+        _svc, _ = make_service(tmp_path)
+        game_state: dict = {"active_slot": None}
+        slot = game_state.get("active_slot", "default")
+        assert slot is None
 
     def test_update_autocleanup_limit(self, tmp_path):
         svc, _ = make_service(tmp_path)
@@ -2013,10 +2090,13 @@ class TestSaveSlots:
         assert result["success"] is True
         assert svc._save_sync_state["saves"]["456"]["active_slot"] == "my-slot"
 
-    def test_set_game_slot_empty_rejected(self, tmp_path):
+    def test_set_game_slot_empty_sets_none(self, tmp_path):
+        """Empty string sets active_slot to None (legacy mode)."""
         svc, _ = make_service(tmp_path)
         result = svc.set_game_slot(123, "")
-        assert result["success"] is False
+        assert result["success"] is True
+        assert result["active_slot"] is None
+        assert svc._save_sync_state["saves"]["123"]["active_slot"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -2786,10 +2866,10 @@ class TestOlderVersionSkipping:
         }
 
         _synced, _errors, _conflicts = svc._sync_rom_saves(42)
-        # pokemon.rtc should be downloaded (newer, different file, not an older version)
-        download_calls = [c for c in fake.call_log if c[0] == "download_save"]
-        assert len(download_calls) == 1
-        assert download_calls[0][1][0] == 20  # save_id=20
+        # pokemon.rtc (save_id=20) is newer in the same slot — surfaced as newer_in_slot conflict
+        newer_conflicts = [c for c in _conflicts if isinstance(c, dict) and c.get("type") == "newer_in_slot"]
+        assert len(newer_conflicts) == 1
+        assert newer_conflicts[0]["newer_save_id"] == 20
 
     def test_different_slot_not_skipped(self, tmp_path):
         """Saves in a different slot should never be skipped."""
@@ -2837,3 +2917,248 @@ class TestOlderVersionSkipping:
         download_calls = [c for c in fake.call_log if c[0] == "download_save"]
         assert len(download_calls) == 1
         assert download_calls[0][1][0] == 20
+
+
+# ---------------------------------------------------------------------------
+# TestNewerInSlotConflict
+# ---------------------------------------------------------------------------
+
+
+class TestNewerInSlotConflict:
+    """Tests for newer-in-slot conflict surfacing and resolution."""
+
+    def _setup_tracked_rom(self, svc, fake, tmp_path, local_hash):
+        """Set up a tracked ROM with a local save and a tracked server save."""
+        _install_rom(svc, tmp_path)
+        svc._save_sync_state["settings"]["save_sync_enabled"] = True
+
+        # Tracked server save (our current save)
+        tracked = _server_save(save_id=100, updated_at="2026-03-20T10:00:00Z", slot="default")
+        tracked["device_syncs"] = [{"device_id": "our-device", "is_current": True}]
+        fake.saves[100] = tracked
+
+        # Set up sync state so local matches tracked
+        svc._save_sync_state["saves"]["42"] = {
+            "system": "gba",
+            "active_slot": "default",
+            "slot_confirmed": True,
+            "files": {
+                "pokemon.srm": {
+                    "tracked_save_id": 100,
+                    "last_sync_hash": local_hash,
+                    "last_sync_at": "2026-03-20T10:00:00Z",
+                    "last_sync_server_updated_at": "2026-03-20T10:00:00Z",
+                    "last_sync_server_save_id": 100,
+                    "last_sync_server_size": 1024,
+                },
+            },
+        }
+        return tracked
+
+    def test_newer_in_slot_surfaces_conflict(self, tmp_path):
+        """When a newer save from another device exists, a newer_in_slot conflict is surfaced."""
+        svc, fake = make_service(tmp_path)
+        save_path = _create_save(tmp_path)
+        local_hash = _file_md5(str(save_path))
+        svc._save_sync_state["server_device_id"] = "our-device"
+        self._setup_tracked_rom(svc, fake, tmp_path, local_hash)
+
+        # Newer save from another device
+        newer = _server_save(save_id=200, updated_at="2026-03-21T10:00:00Z", slot="default")
+        newer["device_syncs"] = [{"device_id": "other-device", "is_current": True}]
+        fake.saves[200] = newer
+
+        _synced, _errors, conflicts = svc._sync_rom_saves(42)
+
+        # Should have a newer_in_slot conflict
+        newer_conflicts = [c for c in conflicts if isinstance(c, dict) and c.get("type") == "newer_in_slot"]
+        assert len(newer_conflicts) == 1
+        assert newer_conflicts[0]["newer_save_id"] == 200
+        assert newer_conflicts[0]["tracked_save_id"] == 100
+        assert newer_conflicts[0]["rom_id"] == 42
+        assert newer_conflicts[0]["filename"] == "pokemon.srm"
+        assert newer_conflicts[0]["slot"] == "default"
+
+    def test_newer_in_slot_skips_normal_sync(self, tmp_path):
+        """When newer_in_slot conflict is surfaced, normal sync is skipped for that file."""
+        svc, fake = make_service(tmp_path)
+        save_path = _create_save(tmp_path)
+        local_hash = _file_md5(str(save_path))
+        svc._save_sync_state["server_device_id"] = "our-device"
+        self._setup_tracked_rom(svc, fake, tmp_path, local_hash)
+
+        newer = _server_save(save_id=200, updated_at="2026-03-21T10:00:00Z", slot="default")
+        newer["device_syncs"] = [{"device_id": "other-device", "is_current": True}]
+        fake.saves[200] = newer
+
+        synced, _errors, _conflicts = svc._sync_rom_saves(42)
+        assert synced == 0  # No sync happened, conflict surfaced instead
+
+    def test_dismissed_newer_save_id_suppresses_conflict(self, tmp_path):
+        """When dismissed_newer_save_id matches, the conflict is not surfaced."""
+        svc, fake = make_service(tmp_path)
+        save_path = _create_save(tmp_path)
+        local_hash = _file_md5(str(save_path))
+        svc._save_sync_state["server_device_id"] = "our-device"
+        self._setup_tracked_rom(svc, fake, tmp_path, local_hash)
+
+        # Mark save 200 as dismissed
+        svc._save_sync_state["saves"]["42"]["files"]["pokemon.srm"]["dismissed_newer_save_id"] = 200
+
+        newer = _server_save(save_id=200, updated_at="2026-03-21T10:00:00Z", slot="default")
+        newer["device_syncs"] = [{"device_id": "other-device", "is_current": True}]
+        fake.saves[200] = newer
+
+        _synced, _errors, conflicts = svc._sync_rom_saves(42)
+        newer_conflicts = [c for c in conflicts if isinstance(c, dict) and c.get("type") == "newer_in_slot"]
+        assert len(newer_conflicts) == 0
+
+    def test_dismissed_does_not_suppress_even_newer_save(self, tmp_path):
+        """A dismissed ID does NOT suppress a conflict from an even newer save."""
+        svc, fake = make_service(tmp_path)
+        save_path = _create_save(tmp_path)
+        local_hash = _file_md5(str(save_path))
+        svc._save_sync_state["server_device_id"] = "our-device"
+        self._setup_tracked_rom(svc, fake, tmp_path, local_hash)
+
+        # Dismissed save 200, but now save 300 is newer
+        svc._save_sync_state["saves"]["42"]["files"]["pokemon.srm"]["dismissed_newer_save_id"] = 200
+
+        newer = _server_save(save_id=300, updated_at="2026-03-22T10:00:00Z", slot="default")
+        newer["device_syncs"] = [{"device_id": "other-device", "is_current": True}]
+        fake.saves[300] = newer
+
+        _synced, _errors, conflicts = svc._sync_rom_saves(42)
+        newer_conflicts = [c for c in conflicts if isinstance(c, dict) and c.get("type") == "newer_in_slot"]
+        assert len(newer_conflicts) == 1
+        assert newer_conflicts[0]["newer_save_id"] == 300
+
+    def test_no_conflict_when_newer_save_is_from_our_device(self, tmp_path):
+        """No conflict when the newer save is from our own device."""
+        svc, fake = make_service(tmp_path)
+        save_path = _create_save(tmp_path)
+        local_hash = _file_md5(str(save_path))
+        svc._save_sync_state["server_device_id"] = "our-device"
+        self._setup_tracked_rom(svc, fake, tmp_path, local_hash)
+
+        # Newer save from OUR device (should not trigger conflict)
+        newer = _server_save(save_id=200, updated_at="2026-03-21T10:00:00Z", slot="default")
+        newer["device_syncs"] = [{"device_id": "our-device", "is_current": True}]
+        fake.saves[200] = newer
+
+        _synced, _errors, conflicts = svc._sync_rom_saves(42)
+        newer_conflicts = [c for c in conflicts if isinstance(c, dict) and c.get("type") == "newer_in_slot"]
+        assert len(newer_conflicts) == 0
+
+
+class TestResolveNewerInSlot:
+    """Tests for resolve_newer_in_slot callable."""
+
+    @pytest.mark.asyncio
+    async def test_dismiss_stores_id(self, tmp_path):
+        svc, _fake = make_service(tmp_path)
+        _install_rom(svc, tmp_path)
+        svc._save_sync_state["settings"]["save_sync_enabled"] = True
+        svc._save_sync_state["saves"]["42"] = {
+            "system": "gba",
+            "active_slot": "default",
+            "files": {"pokemon.srm": {"tracked_save_id": 100}},
+        }
+
+        result = await svc.resolve_newer_in_slot(42, "pokemon.srm", "dismiss", 200)
+        assert result["success"] is True
+        file_state = svc._save_sync_state["saves"]["42"]["files"]["pokemon.srm"]
+        assert file_state["dismissed_newer_save_id"] == 200
+
+    @pytest.mark.asyncio
+    async def test_keep_current_no_state_change(self, tmp_path):
+        svc, _fake = make_service(tmp_path)
+        _install_rom(svc, tmp_path)
+        svc._save_sync_state["saves"]["42"] = {
+            "system": "gba",
+            "active_slot": "default",
+            "files": {"pokemon.srm": {"tracked_save_id": 100}},
+        }
+
+        result = await svc.resolve_newer_in_slot(42, "pokemon.srm", "keep_current", 200)
+        assert result["success"] is True
+        file_state = svc._save_sync_state["saves"]["42"]["files"]["pokemon.srm"]
+        assert "dismissed_newer_save_id" not in file_state
+
+    @pytest.mark.asyncio
+    async def test_use_newer_downloads_save(self, tmp_path):
+        svc, fake = make_service(tmp_path)
+        _install_rom(svc, tmp_path)
+        _create_save(tmp_path)
+        svc._save_sync_state["settings"]["save_sync_enabled"] = True
+        svc._save_sync_state["server_device_id"] = "our-device"
+        svc._save_sync_state["saves"]["42"] = {
+            "system": "gba",
+            "active_slot": "default",
+            "files": {"pokemon.srm": {"tracked_save_id": 100, "dismissed_newer_save_id": 150}},
+        }
+        newer = _server_save(save_id=200, updated_at="2026-03-21T10:00:00Z", slot="default")
+        fake.saves[200] = newer
+
+        result = await svc.resolve_newer_in_slot(42, "pokemon.srm", "use_newer", 200)
+        assert result["success"] is True
+        # Verify download happened
+        download_calls = [c for c in fake.call_log if c[0] == "download_save"]
+        assert len(download_calls) == 1
+        assert download_calls[0][1][0] == 200
+        # dismissed_newer_save_id should be cleared
+        file_state = svc._save_sync_state["saves"]["42"]["files"]["pokemon.srm"]
+        assert "dismissed_newer_save_id" not in file_state
+
+    @pytest.mark.asyncio
+    async def test_use_newer_rom_not_installed(self, tmp_path):
+        svc, _fake = make_service(tmp_path)
+        svc._save_sync_state["saves"]["999"] = {
+            "system": "gba",
+            "active_slot": "default",
+            "files": {"pokemon.srm": {"tracked_save_id": 100}},
+        }
+
+        result = await svc.resolve_newer_in_slot(999, "pokemon.srm", "use_newer", 200)
+        assert result["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_use_newer_save_not_found_on_server(self, tmp_path):
+        svc, _fake = make_service(tmp_path)
+        _install_rom(svc, tmp_path)
+        svc._save_sync_state["server_device_id"] = "our-device"
+        svc._save_sync_state["saves"]["42"] = {
+            "system": "gba",
+            "active_slot": "default",
+            "files": {"pokemon.srm": {"tracked_save_id": 100}},
+        }
+
+        result = await svc.resolve_newer_in_slot(42, "pokemon.srm", "use_newer", 999)
+        assert result["success"] is False
+        assert "not found" in result["message"].lower()
+
+
+class TestUpdateFileSyncStateClearsNewerDismissed:
+    """Test that _update_file_sync_state clears dismissed_newer_save_id."""
+
+    def test_clears_dismissed_newer_save_id(self, tmp_path):
+        svc, _ = make_service(tmp_path)
+        save_file = _create_save(tmp_path)
+        # Pre-populate with dismissed_newer_save_id
+        svc._save_sync_state["saves"]["42"] = {
+            "files": {
+                "pokemon.srm": {
+                    "dismissed_newer_save_id": 200,
+                    "tracked_save_id": 100,
+                },
+            },
+            "system": "gba",
+            "active_slot": "default",
+        }
+        server_resp = {"id": 300, "updated_at": "2026-02-17T15:00:00Z"}
+
+        svc._update_file_sync_state("42", "pokemon.srm", server_resp, str(save_file), "gba")
+
+        entry = svc._save_sync_state["saves"]["42"]["files"]["pokemon.srm"]
+        assert "dismissed_newer_save_id" not in entry
+        assert entry.get("tracked_save_id") == 300

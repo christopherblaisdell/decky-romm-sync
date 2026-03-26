@@ -255,7 +255,7 @@ export interface SaveSyncSettings {
   sync_before_launch: boolean;
   sync_after_exit: boolean;
   clock_skew_tolerance_sec: number;
-  default_slot: string;
+  default_slot: string | null;
   autocleanup_limit: number;
 }
 
@@ -270,6 +270,25 @@ export interface PendingConflict {
   server_updated_at: string;
   server_size: number | null;
   created_at: string;
+}
+
+export interface NewerInSlotConflict {
+  type: "newer_in_slot";
+  rom_id: number;
+  filename: string;
+  tracked_save_id: number | null;
+  tracked_updated_at: string | null;
+  newer_save_id: number;
+  newer_updated_at: string;
+  slot: string | null;
+}
+
+export function isNewerInSlotConflict(c: PendingConflict | NewerInSlotConflict): c is NewerInSlotConflict {
+  return "type" in c && c.type === "newer_in_slot";
+}
+
+export function isPendingConflict(c: PendingConflict | NewerInSlotConflict): c is PendingConflict {
+  return !isNewerInSlotConflict(c);
 }
 
 export interface DeviceSyncInfo {
@@ -308,7 +327,7 @@ export interface SaveStatus {
   device_id: string;
   last_sync_check_at: string | null;
   conflicts?: PendingConflict[];
-  active_slot?: string;
+  active_slot?: string | null;
 }
 
 export interface SaveSlotSummary {

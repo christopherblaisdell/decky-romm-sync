@@ -43,6 +43,8 @@ if TYPE_CHECKING:
     import asyncio
     import logging
 
+    from domain.save_sync import MatchedSave
+
 
 class SaveService:
     """Bidirectional save file sync between local RetroDECK and RomM server.
@@ -439,7 +441,7 @@ class SaveService:
                 "emulator": emulator_tag or "retroarch",
                 "system": system,
                 "last_synced_core": core_so,
-                "active_slot": "default",
+                "active_slot": self._save_sync_state.get("settings", {}).get("default_slot", "default"),
             }
         save_entry = self._save_sync_state["saves"][rom_id_str]
         save_entry.setdefault("files", {})
@@ -450,11 +452,6 @@ class SaveService:
 
         now = datetime.now(UTC).isoformat()
         local_hash = self._file_md5(local_path) if os.path.isfile(local_path) else ""
-        local_mtime = (
-            datetime.fromtimestamp(os.path.getmtime(local_path), tz=UTC).isoformat()
-            if os.path.isfile(local_path)
-            else now
-        )
 
         save_entry["files"][filename] = {
             "last_sync_hash": local_hash,
@@ -462,7 +459,8 @@ class SaveService:
             "last_sync_server_updated_at": server_response.get("updated_at", now),
             "last_sync_server_save_id": server_response.get("id"),
             "last_sync_server_size": server_response.get("file_size_bytes"),
-            "local_mtime_at_last_sync": local_mtime,
+            "last_sync_local_mtime": os.path.getmtime(local_path) if os.path.isfile(local_path) else None,
+            "last_sync_local_size": os.path.getsize(local_path) if os.path.isfile(local_path) else None,
             "tracked_save_id": server_response.get("id"),
         }
 
@@ -543,6 +541,16 @@ class SaveService:
                 slots_dict[slot]["source"] = "server"
                 slots_dict[slot]["count"] = 1
 
+        # Mark device as synced with the uploaded save version.
+        # RomM's upload endpoint updates updated_at but NOT last_synced_at in
+        # DeviceSaveSync, so is_current would be False on the next list_saves.
+        upload_id = result.get("id")
+        if device_id and upload_id and self._romm_api.supports_device_sync():
+            try:
+                self._romm_api.confirm_download(upload_id, device_id)
+            except Exception:
+                self._log_debug(f"confirm_download after upload failed for save {upload_id} (non-fatal)")
+
         self._log_debug(f"Uploaded save: {filename} for rom {rom_id_str} (emulator={emulator})")
         return result
 
@@ -590,7 +598,7 @@ class SaveService:
         server: dict | None,
         local_hash: str,
         errors: list[str],
-        conflicts: list[SaveConflict],
+        conflicts: list[SaveConflict | dict],
     ) -> None:
         """Handle a RommConflictError by recording a conflict or error entry."""
         if local and server:
@@ -630,7 +638,7 @@ class SaveService:
         saves_dir: str,
         system: str,
         errors: list[str],
-        conflicts: list[SaveConflict],
+        conflicts: list[SaveConflict | dict],
     ) -> bool:
         """Execute a resolved sync action (download/upload). Returns True if synced."""
         try:
@@ -660,7 +668,7 @@ class SaveService:
         saves_dir: str,
         system: str,
         errors: list[str],
-        conflicts: list[SaveConflict],
+        conflicts: list[SaveConflict | dict],
     ) -> bool:
         """Process sync for one save file. Returns True if a file was synced."""
         t_file = time.time()
@@ -701,7 +709,57 @@ class SaveService:
         self._log_debug(f"[TIMING] _sync_rom_saves({rom_id}): {action} {filename} {time.time() - t_action:.3f}s")
         return result
 
-    def _sync_rom_saves(self, rom_id: int) -> tuple[int, list[str], list[SaveConflict]]:
+    def _check_newer_in_slot(
+        self,
+        m: MatchedSave,
+        files_state: dict,
+        rom_id: int,
+        save_state: dict,
+        conflicts: list[SaveConflict | dict],
+    ) -> bool:
+        """Check if a matched save has a newer version in its slot from another device.
+
+        Returns True if the normal sync step should be skipped (conflict appended).
+        """
+        if not m.newer_save_in_slot:
+            return False
+        file_state = files_state.get(m.filename, {})
+        dismissed_id = file_state.get("dismissed_newer_save_id")
+        newer_id = m.newer_save_in_slot.get("id")
+        if dismissed_id is None or (newer_id is not None and newer_id > dismissed_id):
+            conflicts.append(
+                self._build_newer_in_slot_conflict(
+                    rom_id,
+                    m.filename,
+                    m.server_save,
+                    m.newer_save_in_slot,
+                    save_state.get("active_slot"),
+                )
+            )
+            return True
+        return False
+
+    @staticmethod
+    def _build_newer_in_slot_conflict(
+        rom_id: int,
+        filename: str,
+        tracked_save: dict | None,
+        newer_save: dict,
+        slot: str | None,
+    ) -> dict:
+        """Build a newer-in-slot conflict descriptor for the frontend."""
+        return {
+            "type": "newer_in_slot",
+            "rom_id": rom_id,
+            "filename": filename,
+            "tracked_save_id": tracked_save.get("id") if tracked_save else None,
+            "tracked_updated_at": tracked_save.get("updated_at") if tracked_save else None,
+            "newer_save_id": newer_save.get("id"),
+            "newer_updated_at": newer_save.get("updated_at"),
+            "slot": slot,
+        }
+
+    def _sync_rom_saves(self, rom_id: int) -> tuple[int, list[str], list[SaveConflict | dict]]:
         """Sync saves for a single ROM (always bidirectional).
 
         Returns ``(synced_count, errors_list, conflicts_list)``.
@@ -748,6 +806,7 @@ class SaveService:
             files_state,
             save_state.get("active_slot"),
             rom_name,
+            device_id=device_id,
         )
 
         # Persist any new tracked_save_ids discovered by fallback matching
@@ -757,9 +816,13 @@ class SaveService:
 
         synced = 0
         errors: list[str] = []
-        conflicts: list[SaveConflict] = []
+        conflicts: list[SaveConflict | dict] = []
 
         for m in match_result.matched:
+            # Check for newer-in-slot before normal sync
+            if self._check_newer_in_slot(m, files_state, rom_id, save_state, conflicts):
+                continue  # Skip normal sync
+
             method_label = f" [{m.match_method}]" if m.match_method not in ("filename", "local_only") else ""
             self._log_debug(
                 f"_sync_rom_saves({rom_id}): {m.filename}{method_label} "
@@ -1128,7 +1191,7 @@ class SaveService:
             "message": msg,
             "synced": synced,
             "errors": errors,
-            "conflicts": [asdict(c) for c in conflicts],
+            "conflicts": [c if isinstance(c, dict) else asdict(c) for c in conflicts],
         }
 
     async def post_exit_sync(self, rom_id: int) -> dict:
@@ -1174,7 +1237,7 @@ class SaveService:
             "message": msg,
             "synced": synced,
             "errors": errors,
-            "conflicts": [asdict(c) for c in conflicts],
+            "conflicts": [c if isinstance(c, dict) else asdict(c) for c in conflicts],
         }
 
     async def sync_rom_saves(self, rom_id: int) -> dict:
@@ -1198,7 +1261,7 @@ class SaveService:
             "message": msg,
             "synced": synced,
             "errors": errors,
-            "conflicts": [asdict(c) for c in conflicts],
+            "conflicts": [c if isinstance(c, dict) else asdict(c) for c in conflicts],
         }
 
     async def get_save_slots(self, rom_id: int) -> dict:
@@ -1282,24 +1345,25 @@ class SaveService:
         uploaded to it.
         """
         rom_id = int(rom_id)
-        slot = str(slot).strip()
-        if not slot:
-            return {"success": False, "message": "Slot name cannot be empty"}
+        slot_str = str(slot).strip() if slot else ""
+        # Empty string = legacy mode (None slot)
+        resolved_slot: str | None = slot_str if slot_str else None
 
         rom_id_str = str(rom_id)
         saves = self._save_sync_state.setdefault("saves", {})
         if rom_id_str not in saves:
-            saves[rom_id_str] = {"files": {}, "active_slot": slot}
+            saves[rom_id_str] = {"files": {}, "active_slot": resolved_slot}
         else:
-            saves[rom_id_str]["active_slot"] = slot
+            saves[rom_id_str]["active_slot"] = resolved_slot
 
-        # Ensure slot is in the persisted slots dict
-        slots_dict: dict[str, dict] = saves[rom_id_str].setdefault("slots", {})
-        if slot not in slots_dict:
-            slots_dict[slot] = {"source": "local", "count": 0, "latest_updated_at": None}
+        # Ensure slot is in the persisted slots dict (skip for None/legacy)
+        if resolved_slot is not None:
+            slots_dict: dict[str, dict] = saves[rom_id_str].setdefault("slots", {})
+            if resolved_slot not in slots_dict:
+                slots_dict[resolved_slot] = {"source": "local", "count": 0, "latest_updated_at": None}
 
         self.save_state()
-        return {"success": True, "active_slot": slot}
+        return {"success": True, "active_slot": resolved_slot}
 
     # ------------------------------------------------------------------
     # Save Setup Wizard
@@ -1518,7 +1582,7 @@ class SaveService:
 
         total_synced = 0
         total_errors: list[str] = []
-        all_conflicts: list[SaveConflict] = []
+        all_conflicts: list[SaveConflict | dict] = []
         rom_count = 0
 
         # Only iterate installed ROMs — non-installed ROMs have no save files
@@ -1545,7 +1609,7 @@ class SaveService:
             "message": msg,
             "synced": total_synced,
             "conflicts": conflicts_count,
-            "conflicts_list": [asdict(c) for c in all_conflicts],
+            "conflicts_list": [c if isinstance(c, dict) else asdict(c) for c in all_conflicts],
             "roms_checked": rom_count,
             "errors": total_errors,
         }
@@ -1602,6 +1666,51 @@ class SaveService:
             self._logger.error(f"Conflict resolution failed: {e}")
             return {"success": False, "message": "Conflict resolution failed"}
 
+    async def resolve_newer_in_slot(self, rom_id: int, filename: str, resolution: str, newer_save_id: int) -> dict:
+        """Resolve a newer-in-slot conflict.
+
+        resolution: ``"use_newer"`` | ``"keep_current"`` | ``"dismiss"``
+        """
+        rom_id = int(rom_id)
+        rom_id_str = str(rom_id)
+
+        if resolution == "use_newer":
+            info = self._get_rom_save_info(rom_id)
+            if not info:
+                return {"success": False, "message": "ROM save info not found"}
+            device_id = self._get_server_device_id()
+            server_saves = await self._loop.run_in_executor(
+                None,
+                lambda: self._retry.with_retry(lambda: self._romm_api.list_saves(rom_id, device_id=device_id)),
+            )
+            newer_save = next((s for s in server_saves if s.get("id") == newer_save_id), None)
+            if not newer_save:
+                return {"success": False, "message": "Newer save not found on server"}
+            await self._loop.run_in_executor(
+                None,
+                self._do_download_save,
+                newer_save,
+                info["saves_dir"],
+                filename,
+                rom_id_str,
+                info["system"],
+            )
+            # Re-fetch live reference — _do_download_save replaced the dict
+            live_state = self._save_sync_state["saves"].get(rom_id_str, {}).get("files", {}).get(filename, {})
+            live_state.pop("dismissed_newer_save_id", None)
+            self.save_state()
+            return {"success": True, "message": "Downloaded newer save"}
+
+        if resolution == "dismiss":
+            files = self._save_sync_state.get("saves", {}).get(rom_id_str, {}).setdefault("files", {})
+            live_state = files.setdefault(filename, {})
+            live_state["dismissed_newer_save_id"] = newer_save_id
+            self.save_state()
+            return {"success": True, "message": "Dismissed"}
+
+        # keep_current
+        return {"success": True, "message": "Keeping current save"}
+
     def get_save_sync_settings(self) -> dict:
         """Return current save sync settings."""
         settings = self._save_sync_state.get("settings", {})
@@ -1628,8 +1737,10 @@ class SaveService:
         if key == "clock_skew_tolerance_sec":
             return max(0, int(value)), False  # type: ignore[arg-type]
         if key == "default_slot":
+            if value is None:
+                return None, False  # None = legacy mode
             coerced = str(value).strip()
-            return coerced, not coerced  # skip if empty
+            return (coerced if coerced else None), False  # empty -> None
         if key == "autocleanup_limit":
             return max(1, int(value)), False  # type: ignore[arg-type]
         if key in ("save_sync_enabled", "sync_before_launch", "sync_after_exit"):
