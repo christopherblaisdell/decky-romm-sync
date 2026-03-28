@@ -2,22 +2,34 @@
 
 Detects when RetroDECK home path changes (e.g., internal SSD to SD card)
 and migrates downloaded ROMs, BIOS files, and save files to the new location.
+Also detects RetroArch save sorting setting changes and migrates affected save files.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from domain import retrodeck_config
+from domain.save_extensions import get_save_extensions
+from domain.save_path import resolve_save_dir
 
 if TYPE_CHECKING:
     import asyncio
     import logging
     from collections.abc import Callable
 
-    from services.protocols import EventEmitter, StatePersister
+    from services.protocols import (
+        BiosPathProvider,
+        CoreResolverFn,
+        EventEmitter,
+        RetroArchSaveSortingProvider,
+        RetroDeckHomeProvider,
+        RomsPathProvider,
+        SavesPathProvider,
+        StatePersister,
+    )
 
 
 class MigrationService:
@@ -32,6 +44,12 @@ class MigrationService:
         save_state: StatePersister,
         emit: EventEmitter,
         get_bios_files_index: Callable[[], dict],
+        get_retrodeck_home: RetroDeckHomeProvider | None = None,
+        get_saves_path: SavesPathProvider | None = None,
+        get_bios_path: BiosPathProvider | None = None,
+        get_retroarch_save_sorting: RetroArchSaveSortingProvider | None = None,
+        get_roms_path: RomsPathProvider | None = None,
+        get_active_core: CoreResolverFn | None = None,
     ) -> None:
         self._state = state
         self._loop = loop
@@ -39,10 +57,16 @@ class MigrationService:
         self._save_state = save_state
         self._emit = emit
         self._get_bios_files_index = get_bios_files_index
+        self._get_retrodeck_home = get_retrodeck_home
+        self._get_saves_path = get_saves_path
+        self._get_bios_path = get_bios_path
+        self._get_retroarch_save_sorting = get_retroarch_save_sorting
+        self._get_roms_path = get_roms_path
+        self._get_active_core = get_active_core
 
     def detect_retrodeck_path_change(self) -> None:
         """Check if RetroDECK home path changed since last run."""
-        current_home = retrodeck_config.get_retrodeck_home()
+        current_home = self._get_retrodeck_home() if self._get_retrodeck_home else ""
         stored_home = self._state.get("retrodeck_home_path", "")
 
         if not current_home:
@@ -135,7 +159,7 @@ class MigrationService:
         """Collect untracked BIOS migration items (downloaded before state tracking)."""
         items = []
         old_bios = os.path.join(old_home, "bios")
-        new_bios = retrodeck_config.get_bios_path()
+        new_bios = self._get_bios_path() if self._get_bios_path else ""
         if not os.path.isdir(old_bios):
             return items
         downloaded_bios = self._state.get("downloaded_bios", {})
@@ -150,12 +174,11 @@ class MigrationService:
             items.append((file_name, old_file, new_file, lambda: None, "bios"))
         return items
 
-    @staticmethod
-    def _collect_save_items(old_home):
+    def _collect_save_items(self, old_home):
         """Collect save file migration items by scanning old saves directory."""
         items = []
         old_saves = os.path.join(old_home, "saves")
-        new_saves = retrodeck_config.get_saves_path()
+        new_saves = self._get_saves_path() if self._get_saves_path else ""
         if not os.path.isdir(old_saves):
             return items
         for dirpath, _dirs, filenames in os.walk(old_saves):
@@ -190,6 +213,27 @@ class MigrationService:
             if os.path.exists(new_path) and os.path.exists(old_path):
                 conflict_set.add(label)
         return sorted(conflict_set)
+
+    @staticmethod
+    def _build_conflict_details(items: list) -> list[dict]:
+        """Return details for items where both source and destination exist."""
+        details = []
+        for label, old_path, new_path, _updater, _kind in items:
+            if os.path.exists(new_path) and os.path.exists(old_path):
+                old_stat = os.stat(old_path)
+                new_stat = os.stat(new_path)
+                details.append(
+                    {
+                        "filename": label,
+                        "old_path": old_path,
+                        "old_size": old_stat.st_size,
+                        "old_mtime": datetime.fromtimestamp(old_stat.st_mtime, tz=UTC).isoformat(),
+                        "new_path": new_path,
+                        "new_size": new_stat.st_size,
+                        "new_mtime": datetime.fromtimestamp(new_stat.st_mtime, tz=UTC).isoformat(),
+                    }
+                )
+        return sorted(details, key=lambda d: d["filename"])
 
     def _migrate_single_item(self, label, old_path, new_path, state_updater, kind, conflict_strategy, counts, errors):
         """Migrate a single file/directory item. Updates counts and errors in place."""
@@ -361,3 +405,159 @@ class MigrationService:
             return {"pending": False}
 
         return await self._loop.run_in_executor(None, self._get_migration_status_io, old_home, new_home)
+
+    # ---------------------------------------------------------------------------
+    # Save sort change detection and migration
+    # ---------------------------------------------------------------------------
+
+    def detect_save_sort_change(self) -> None:
+        """Check if RetroArch save sorting settings changed since last run."""
+        if self._get_retroarch_save_sorting is None:
+            return
+        sort_by_content, sort_by_core = self._get_retroarch_save_sorting()
+        current = {"sort_by_content": sort_by_content, "sort_by_core": sort_by_core}
+        stored = self._state.get("save_sort_settings")
+        if stored is None:
+            self._state["save_sort_settings"] = current
+            self._save_state()
+            return
+        if stored == current:
+            return
+        self._state["save_sort_settings_previous"] = stored
+        self._state["save_sort_settings"] = current
+        self._save_state()
+        self._logger.warning(f"RetroArch save sorting changed: {stored} -> {current}")
+        self._loop.create_task(
+            self._emit(
+                "save_sort_changed",
+                {"old_settings": stored, "new_settings": current},
+            )
+        )
+
+    def _resolve_core_name(self, system: str, rom_filename: str) -> str | None:
+        """Resolve the RetroArch core directory name for a system/ROM."""
+        if not self._get_active_core:
+            return None
+        _core_so, label = self._get_active_core(system, rom_filename)
+        return label or None
+
+    def _collect_save_sorting_items(self, old_settings: dict, new_settings: dict) -> list:
+        """Collect save files that need migration due to sort setting change."""
+        if not self._get_saves_path or not self._get_roms_path:
+            return []
+        saves_base = self._get_saves_path()
+        roms_base = self._get_roms_path()
+        need_core = bool(old_settings.get("sort_by_core") or new_settings.get("sort_by_core"))
+        items: list[tuple[str, str, str, object, str]] = []
+        for entry in self._state.get("installed_roms", {}).values():
+            self._collect_rom_sort_items(
+                entry,
+                saves_base,
+                roms_base,
+                old_settings,
+                new_settings,
+                need_core,
+                items,
+            )
+        return items
+
+    def _collect_rom_sort_items(
+        self,
+        entry: dict,
+        saves_base: str,
+        roms_base: str,
+        old_settings: dict,
+        new_settings: dict,
+        need_core: bool,
+        items: list,
+    ) -> None:
+        """Collect migration items for a single ROM's save files."""
+        system = entry.get("system", "")
+        file_path = entry.get("file_path", "")
+        platform_slug = entry.get("platform_slug", "")
+        if not system or not file_path:
+            return
+        core_name = self._resolve_core_name(system, os.path.basename(file_path)) if need_core else None
+        old_dir = resolve_save_dir(
+            file_path,
+            saves_base,
+            system,
+            roms_base=roms_base,
+            sort_by_content=old_settings["sort_by_content"],
+            sort_by_core=old_settings["sort_by_core"],
+            core_name=core_name,
+        )
+        new_dir = resolve_save_dir(
+            file_path,
+            saves_base,
+            system,
+            roms_base=roms_base,
+            sort_by_content=new_settings["sort_by_content"],
+            sort_by_core=new_settings["sort_by_core"],
+            core_name=core_name,
+        )
+        if old_dir == new_dir:
+            return
+        rom_name = os.path.splitext(os.path.basename(file_path))[0]
+        for ext in get_save_extensions(platform_slug):
+            filename = rom_name + ext
+            old_file = os.path.join(old_dir, filename)
+            new_file = os.path.join(new_dir, filename)
+            if os.path.exists(old_file):
+                items.append((filename, old_file, new_file, lambda: None, "save"))
+
+    def _get_save_sort_migration_status_io(self, old_settings: dict, new_settings: dict) -> dict:
+        items = self._collect_save_sorting_items(old_settings, new_settings)
+        return {
+            "pending": True,
+            "old_settings": old_settings,
+            "new_settings": new_settings,
+            "saves_count": len(items),
+        }
+
+    def dismiss_save_sort_migration(self) -> dict:
+        """Dismiss the save sort migration warning without migrating files."""
+        self._state.pop("save_sort_settings_previous", None)
+        self._save_state()
+        return {"success": True}
+
+    async def get_save_sort_migration_status(self) -> dict:
+        old = self._state.get("save_sort_settings_previous")
+        new = self._state.get("save_sort_settings")
+        if not old or not new or old == new:
+            return {"pending": False}
+        return await self._loop.run_in_executor(None, self._get_save_sort_migration_status_io, old, new)
+
+    def _migrate_save_sort_files_io(
+        self, old_settings: dict, new_settings: dict, conflict_strategy: str | None
+    ) -> dict:
+        items = self._collect_save_sorting_items(old_settings, new_settings)
+        if not items:
+            self._state.pop("save_sort_settings_previous", None)
+            self._save_state()
+            return {"success": True, "message": "No save files to migrate", "saves_moved": 0}
+        if conflict_strategy is None:
+            conflict_details = self._build_conflict_details(items)
+            if conflict_details:
+                return {
+                    "success": False,
+                    "needs_confirmation": True,
+                    "conflict_count": len(conflict_details),
+                    "conflicts": conflict_details,
+                    "message": f"{len(conflict_details)} save file(s) exist at both old and new locations",
+                }
+        counts: dict[str, int] = {"rom": 0, "bios": 0, "save": 0}
+        errors: list[str] = []
+        for label, old_path, new_path, updater, kind in items:
+            self._migrate_single_item(label, old_path, new_path, updater, kind, conflict_strategy, counts, errors)
+        if not errors:
+            self._state.pop("save_sort_settings_previous", None)
+            self._save_state()
+        return self._build_migration_result(counts, errors)
+
+    async def migrate_save_sort_files(self, conflict_strategy: str | None = None) -> dict:
+        old = self._state.get("save_sort_settings_previous")
+        new = self._state.get("save_sort_settings")
+        if not old or not new or old == new:
+            return {"success": False, "message": "No save sorting migration needed"}
+        return await self._loop.run_in_executor(None, self._migrate_save_sort_files_io, old, new, conflict_strategy)

@@ -33,7 +33,13 @@ from domain.save_extensions import get_save_extensions
 from domain.save_path import resolve_save_dir
 from domain.save_sync import determine_sync_action, match_local_to_server_saves
 from lib.errors import RommApiError, RommConflictError, classify_error
-from services.protocols import CoreResolverFn, RetryStrategy, RommApiProtocol, RomsPathProvider, SavesPathProvider
+from services.protocols import (
+    CoreResolverFn,
+    RetryStrategy,
+    RommApiProtocol,
+    RomsPathProvider,
+    SavesPathProvider,
+)
 
 _DEVICE_NOT_REGISTERED = "Device not registered"
 _NO_MIGRATION = object()  # sentinel: no slot migration requested
@@ -75,6 +81,8 @@ class SaveService:
     get_active_core:
         Callable resolving the active RetroArch core for a system/game.
         Returns ``(core_so, label)`` tuple; either may be None if unresolved.
+    get_retroarch_save_sorting:
+        Callable returning ``(sort_by_content, sort_by_core)`` booleans from retroarch.cfg.
     """
 
     _LOG_LEVELS: ClassVar[dict[str, int]] = {"debug": 0, "info": 1, "warn": 2, "error": 3}
@@ -232,17 +240,22 @@ class SaveService:
         rom_name = os.path.splitext(os.path.basename(file_path))[0]
 
         # Use domain save path resolution.
-        # RetroDECK defaults: sort_by_content=True, sort_by_core=False
-        # TODO(#186): Read sort_savefiles_by_content_enable / sort_savefiles_enable from retroarch.cfg
+        # Read sort settings from state (populated by MigrationService at startup).
         saves_base = self._get_saves_path()
         roms_base = self._get_roms_path()
+        sort_state = self._state.get("save_sort_settings")
+        if sort_state:
+            sort_by_content = sort_state.get("sort_by_content", True)
+            sort_by_core = sort_state.get("sort_by_core", False)
+        else:
+            sort_by_content, sort_by_core = True, False  # RetroDECK defaults
         saves_dir = resolve_save_dir(
             file_path,
             saves_base,
             system,
             roms_base=roms_base,
-            sort_by_content=True,
-            sort_by_core=False,
+            sort_by_content=sort_by_content,
+            sort_by_core=sort_by_core,
         )
 
         return {
@@ -252,6 +265,10 @@ class SaveService:
             "platform_slug": platform_slug,
             "file_path": file_path,
         }
+
+    def _is_save_sort_changed(self) -> bool:
+        """Check if a save sort migration is pending (detected by MigrationService)."""
+        return self._state.get("save_sort_settings_previous") is not None
 
     # ------------------------------------------------------------------
     # File Helpers
@@ -977,6 +994,7 @@ class SaveService:
             "device_id": self._save_sync_state.get("device_id", ""),
             "last_sync_check_at": save_entry.get("last_sync_check_at"),
             "conflicts": conflicts,
+            "save_sort_changed": self._is_save_sort_changed(),
         }
 
     def _resolve_conflict_io(
@@ -1096,6 +1114,14 @@ class SaveService:
         """Download newer saves from server before game launch."""
         if not self._is_save_sync_enabled():
             return {"success": True, "message": "Save sync disabled", "synced": 0}
+
+        if self._is_save_sort_changed():
+            return {
+                "success": False,
+                "message": "RetroArch save sorting changed — migrate saves in Settings first",
+                "synced": 0,
+                "save_sort_changed": True,
+            }
 
         settings = self._save_sync_state.get("settings", {})
         if not settings.get("sync_before_launch", True):
