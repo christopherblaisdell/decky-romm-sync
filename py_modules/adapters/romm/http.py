@@ -53,6 +53,11 @@ class RommHttpAdapter:
         self._settings = settings
         self._plugin_dir = plugin_dir
         self._logger = logger
+        self._perf = None  # Optional PerfCollector, set via set_perf_collector()
+
+    def set_perf_collector(self, perf) -> None:
+        """Attach a PerfCollector instance to record HTTP metrics."""
+        self._perf = perf
 
     # ------------------------------------------------------------------
     # Platform map
@@ -182,6 +187,8 @@ class RommHttpAdapter:
                 if attempt < max_attempts - 1 and self.is_retryable(exc):
                     delay = base_delay * (3**attempt)
                     self._logger.info(f"Retry {attempt + 1}/{max_attempts} after {delay}s: {exc}")
+                    if self._perf is not None:
+                        self._perf.increment("http_retries")
                     time.sleep(delay)
                 else:
                     raise
@@ -191,6 +198,11 @@ class RommHttpAdapter:
     # HTTP request methods
     # ------------------------------------------------------------------
 
+    def _record_http(self, method: str, path: str, elapsed: float, status: int, nbytes: int) -> None:
+        """Record an HTTP request in the attached PerfCollector, if any."""
+        if self._perf is not None:
+            self._perf.record_http_request(method, path, elapsed, status, nbytes)
+
     def request(self, path: str):
         """GET a JSON resource from the RomM API."""
         url = self._settings["romm_url"].rstrip("/") + path
@@ -198,13 +210,21 @@ class RommHttpAdapter:
         def _do_request():
             req = urllib.request.Request(url, method="GET")
             req.add_header("Authorization", self.auth_header())
+            t0 = time.monotonic()
+            status = 0
+            nbytes = 0
             try:
                 with urllib.request.urlopen(req, context=self.ssl_context(), timeout=30) as resp:
-                    return json.loads(resp.read().decode())
+                    data = resp.read()
+                    status = resp.status
+                    nbytes = len(data)
+                    return json.loads(data.decode())
             except RommApiError:
                 raise
             except Exception as exc:
                 raise self.translate_http_error(exc, url, "GET") from exc
+            finally:
+                self._record_http("GET", path, time.monotonic() - t0, status, nbytes)
 
         return self.with_retry(_do_request)
 
@@ -253,6 +273,9 @@ class RommHttpAdapter:
             req = urllib.request.Request(url, method="GET")
             req.add_header("Authorization", self.auth_header())
             ctx = self.ssl_context()
+            t0 = time.monotonic()
+            status = 0
+            nbytes = 0
             try:
                 with urllib.request.urlopen(req, context=ctx, timeout=self._CONNECT_TIMEOUT) as resp:
                     raw_sock = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
@@ -261,11 +284,15 @@ class RommHttpAdapter:
                     total, downloaded = self._stream_to_file(
                         resp, dest_path, progress_callback, block_size=self._DOWNLOAD_BLOCK_SIZE, url=url
                     )
+                    status = resp.status
+                    nbytes = downloaded
                 self._validate_download(total, downloaded)
             except RommApiError:
                 raise
             except Exception as exc:
                 raise self.translate_http_error(exc, url, "GET") from exc
+            finally:
+                self._record_http("GET", path, time.monotonic() - t0, status, nbytes)
 
         return self.with_retry(_do_download)
 

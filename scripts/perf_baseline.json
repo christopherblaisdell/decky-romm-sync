@@ -1,0 +1,48 @@
+{
+  "success": true,
+  "timestamp": "2026-04-05T19:16:55",
+  "romm_url": "http://theblaze-aorus:8098",
+  "target_platforms": [
+    "dc",
+    "gba",
+    "nes",
+    "psp",
+    "psx",
+    "snes"
+  ],
+  "report": {
+    "wall_time": 83.139,
+    "phases": {
+      "fetch_platforms": 0.97,
+      "fetch_roms": 81.065,
+      "fetch_collections": 0.965,
+      "prepare_shortcuts": 0.017,
+      "download_artwork_sample": 0.114
+    },
+    "http": {
+      "total_requests": 144,
+      "total_bytes": 24380310,
+      "total_time": 83.048,
+      "errors": 0,
+      "by_method": {
+        "GET": {
+          "count": 144,
+          "total_time": 83.04835517400716,
+          "total_bytes": 24380310
+        }
+      }
+    },
+    "counters": {
+      "platforms_fetched": 6,
+      "covers_downloaded": 3
+    },
+    "gauges": {
+      "total_platforms_available": 90,
+      "target_platforms": 6,
+      "total_roms": 6756,
+      "collections": 101,
+      "shortcuts_prepared": 6756
+    }
+  },
+  "formatted": "Sync completed in 83.1s\n  Phases:\n    fetch_platforms: 1.0s (1%)\n    fetch_roms: 81.1s (98%)\n    fetch_collections: 1.0s (1%)\n    prepare_shortcuts: 0.0s (0%)\n    download_artwork_sample: 0.1s (0%)\n  HTTP: 144 requests, 23.3 MB, 83.0s cumulative\n    GET: 144 reqs, 83.0s\n  Counters:\n    platforms_fetched: 6\n    covers_downloaded: 3\n  Gauges:\n    total_platforms_available: 90\n    target_platforms: 6\n    total_roms: 6756\n    collections: 101\n    shortcuts_prepared: 6756"
+}

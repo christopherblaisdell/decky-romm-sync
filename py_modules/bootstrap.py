@@ -247,6 +247,10 @@ def wire_services(cfg: WiringConfig) -> dict:
     # Resolve the circular dependency: point the box at the real sync_state getter.
     _sync_state_box[0] = lambda: sync_service.sync_state
 
+    # Wire PerfCollector from sync_service into the HTTP adapter so all
+    # HTTP requests are automatically recorded for performance analysis.
+    cfg.http_adapter.set_perf_collector(sync_service.perf)
+
     download_service = DownloadService(
         romm_api=cfg.romm_api,
         resolve_system=cfg.http_adapter.resolve_system,
