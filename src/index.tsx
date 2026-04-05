@@ -14,7 +14,7 @@ import { DownloadQueue } from "./components/DownloadQueue";
 import { initSyncManager } from "./utils/syncManager";
 import { setSyncProgress } from "./utils/syncProgress";
 import { updateDownload, getDownloadState } from "./utils/downloadStore";
-import { registerGameDetailPatch, unregisterGameDetailPatch, registerRomMAppId } from "./patches/gameDetailPatch";
+import { unregisterGameDetailPatch, registerRomMAppId } from "./patches/gameDetailPatch";
 import { registerMetadataPatches, unregisterMetadataPatches, applyAllPlaytime } from "./patches/metadataPatches";
 import { registerLaunchInterceptor, unregisterLaunchInterceptor } from "./utils/launchInterceptor";
 import { getAllMetadataCache, getAppIdRomIdMap, ensureDeviceRegistered, getSaveSyncSettings, getAllPlaytime, getMigrationStatus, getSaveSortMigrationStatus, logError, logInfo } from "./api/backend";
@@ -48,7 +48,9 @@ const QAMPanel: FC = () => {
 };
 
 export default definePlugin(() => {
-  registerGameDetailPatch();
+  // registerGameDetailPatch() intentionally removed — it calls
+  // routerHook.addPatch() which triggers Decky route re-renders that crash
+  // Steam's Library page (GetAppCountWithToolsFilter TypeError).
   registerLaunchInterceptor();
 
   // Load metadata cache, register store patches, and populate RomM app ID set.
