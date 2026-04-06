@@ -63,6 +63,15 @@ RUNNING THIS SCRIPT
     ROMM_URL=http://host:8098  ROMM_USER=user  ROMM_PASS=pass
     PERF_OUTPUT=/path/to/output.json
 
+BRANCH LAYOUT
+  main                             — upstream base (v0.15.0)
+  feat/perf-instrumentation-v2     — Feature 1 only, PUBLISHED to fork
+  feat/concurrent-sync-performance — LOCAL ONLY, 51 commits, broken
+  feat/perf-instrumentation        — LOCAL ONLY, old perf attempt (superseded by v2)
+
+  Only feat/perf-instrumentation-v2 is pushed to the remote fork.
+  The other two feature branches exist locally only and must not be pushed.
+
 ═══════════════════════════════════════════════════════════════════════
 """
 
