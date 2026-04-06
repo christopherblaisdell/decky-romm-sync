@@ -630,7 +630,7 @@ class LibraryService:
     async def _full_fetch_platform_roms(self, platform_id, platform_name, platform_slug, all_roms, pi, total_platforms):
         """Full paginated fetch of ROMs for a single platform."""
         offset = 0
-        limit = 50
+        limit = 250
         await self._emit_progress(
             "roms",
             current=len(all_roms),
@@ -689,7 +689,7 @@ class LibraryService:
         coll_rom_ids: list[int] = []
 
         offset = 0
-        limit = 50
+        limit = 250
         while True:
             self._check_cancelling()
             if is_virtual:

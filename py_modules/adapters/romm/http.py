@@ -5,6 +5,7 @@ logger) are injected via the constructor.
 """
 
 import base64
+import gzip
 import json
 import logging
 import os
@@ -198,9 +199,13 @@ class RommHttpAdapter:
         def _do_request():
             req = urllib.request.Request(url, method="GET")
             req.add_header("Authorization", self.auth_header())
+            req.add_header("Accept-Encoding", "gzip")
             try:
                 with urllib.request.urlopen(req, context=self.ssl_context(), timeout=30) as resp:
-                    return json.loads(resp.read().decode())
+                    data = resp.read()
+                    if resp.headers.get("Content-Encoding") == "gzip":
+                        data = gzip.decompress(data)
+                    return json.loads(data.decode())
             except RommApiError:
                 raise
             except Exception as exc:

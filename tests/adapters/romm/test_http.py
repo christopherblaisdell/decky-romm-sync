@@ -157,6 +157,7 @@ class TestRommRequest:
 
         fake_resp = MagicMock()
         fake_resp.read.return_value = _json.dumps({"ok": True}).encode()
+        fake_resp.headers = {"Content-Type": "application/json"}
         fake_resp.__enter__ = MagicMock(return_value=fake_resp)
         fake_resp.__exit__ = MagicMock(return_value=False)
 
@@ -166,6 +167,31 @@ class TestRommRequest:
         assert result == {"ok": True}
         req = mock_open.call_args[0][0]
         assert "Basic " in req.get_header("Authorization")
+        assert req.get_header("Accept-encoding") == "gzip"
+
+    def test_decompresses_gzip_response(self, plugin):
+        import gzip as _gzip
+        import json as _json
+        from unittest.mock import MagicMock, patch
+
+        plugin.settings["romm_url"] = "http://romm.local"
+        plugin.settings["romm_user"] = "user"
+        plugin.settings["romm_pass"] = "pass"
+        plugin.settings["romm_allow_insecure_ssl"] = False
+
+        payload = _json.dumps({"items": [1, 2, 3]}).encode()
+        compressed = _gzip.compress(payload)
+
+        fake_resp = MagicMock()
+        fake_resp.read.return_value = compressed
+        fake_resp.headers = {"Content-Encoding": "gzip", "Content-Type": "application/json"}
+        fake_resp.__enter__ = MagicMock(return_value=fake_resp)
+        fake_resp.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", return_value=fake_resp):
+            result = plugin._http_adapter.request("/api/roms")
+
+        assert result == {"items": [1, 2, 3]}
 
 
 class TestRommJsonRequest:
