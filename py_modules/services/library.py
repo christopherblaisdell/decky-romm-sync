@@ -951,6 +951,8 @@ class LibraryService:
             )
 
             self._logger.info(f"Sync data emitted: {len(shortcuts_data)} shortcuts, {len(stale_rom_ids)} stale")
+            self._perf.set_gauge("shortcuts_emitted", len(shortcuts_data))
+            self._perf.set_gauge("stale_rom_ids", len(stale_rom_ids))
         except Exception as e:
             import traceback
 
