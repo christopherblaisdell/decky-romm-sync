@@ -14,6 +14,7 @@ import {
 import { FaCheckCircle, FaTimesCircle } from "react-icons/fa";
 import {
   testConnection,
+  startSync,
   cancelSync,
   getSyncStats,
   getSettings,
@@ -150,32 +151,26 @@ export const MainPage: FC<MainPageProps> = ({ onNavigate }) => {
     setSyncProgress({ running: true, phase: "fetching", message: "Fetching library..." });
     startPolling(true);
     try {
-      const result = await syncPreview();
-      stopPolling();
-      if (result.success) {
-        const hasChanges = result.summary.new_count + result.summary.changed_count + result.summary.remove_count > 0 || !!result.summary.collection_diff?.has_changes || !!result.summary.platform_collection_diff?.has_changes;
-        if (skipPreview && hasChanges) {
-          // Auto-apply: skip preview UI
-          setSyncProgress({ running: true, phase: "applying", message: "Applying changes..." });
-          const applyResult = await syncApplyDelta(result.preview_id);
-          if (applyResult.success) {
-            startPolling();
-          } else {
-            setStatus(applyResult.message);
-            setSyncing(false);
-            setLoading(false);
-          }
-        } else if (skipPreview) {
-          // Nothing to sync — show brief status
-          await syncCancelPreview();
-          setStatus("Everything is up to date");
-          setSyncing(false);
-          setLoading(false);
+      if (skipPreview) {
+        // Per-unit pipeline: skip preview, go straight to full sync
+        const result = await startSync();
+        if (result.success) {
+          // Polling loop will detect completion via sync_progress
+          startPolling();
         } else {
-          setPreview(result);
+          stopPolling();
+          setStatus(result.message || "Sync failed to start");
           setSyncing(false);
           setLoading(false);
         }
+        return;
+      }
+      const result = await syncPreview();
+      stopPolling();
+      if (result.success) {
+        setPreview(result);
+        setSyncing(false);
+        setLoading(false);
       } else {
         setStatus(result.message || "Preview failed");
         setSyncing(false);

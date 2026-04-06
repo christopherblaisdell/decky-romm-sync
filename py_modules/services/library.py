@@ -10,6 +10,7 @@ Shortcut removal is delegated to ShortcutRemovalService.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from datetime import UTC, datetime
@@ -862,97 +863,412 @@ class LibraryService:
 
         return all_roms, shortcuts_data, platforms, collection_memberships, platform_rom_ids
 
+    # ── Per-unit sync helpers ────────────────────────────────
+
+    async def _build_work_queue(self):
+        """Phase 0: Build the ordered list of work units (platforms then collections).
+
+        Returns (work_queue, platforms_list, enabled_collections_metadata).
+        """
+        platforms = await self._fetch_enabled_platforms()
+        self._check_cancelling()
+
+        work_queue = []
+        for p in platforms:
+            work_queue.append({
+                "type": "platform",
+                "id": p["id"],
+                "name": p.get("name", p.get("display_name", "Unknown")),
+                "slug": p.get("slug", ""),
+                "rom_count": p.get("rom_count", 0),
+                "_platform": p,
+            })
+
+        # Fetch collection metadata (list only, not ROMs)
+        enabled_collections = self._settings.get("enabled_collections", {})
+        enabled_ids = {k for k, v in enabled_collections.items() if v}
+        collections_meta = []
+        if enabled_ids:
+            try:
+                user_collections = await self._loop.run_in_executor(None, self._romm_api.list_collections)
+                franchise_collections = []
+                try:
+                    franchise_collections = await self._loop.run_in_executor(
+                        None, self._romm_api.list_virtual_collections, "franchise"
+                    )
+                except Exception as e:
+                    self._logger.warning(f"Failed to fetch franchise collections: {e}")
+
+                for c in user_collections + franchise_collections:
+                    cid = str(c.get("id", ""))
+                    if cid in enabled_ids:
+                        collections_meta.append(c)
+                        work_queue.append({
+                            "type": "collection",
+                            "id": cid,
+                            "name": c.get("name", cid),
+                            "rom_count": c.get("rom_count", len(c.get("rom_ids", []))),
+                            "_collection": c,
+                        })
+            except RommUnsupportedError:
+                self._logger.info("Collections not supported on this RomM version")
+            except Exception as e:
+                self._logger.warning(f"Failed to fetch collection list: {e}")
+
+        return work_queue, platforms, collections_meta
+
+    async def _sync_one_platform(self, unit, synced_rom_ids, unit_index, total_units):
+        """Sync a single platform unit: fetch ROMs → build shortcuts → artwork → emit.
+
+        Returns (unit_roms, shortcuts_data) for the platform.
+        """
+        platform = unit["_platform"]
+        platform_name = unit["name"]
+        platform_slug = unit["slug"]
+        platform_id = unit["id"]
+
+        # Fetch ROMs (incremental skip or full fetch)
+        unit_roms = []
+        last_sync = self._state.get("last_sync")
+        registry = self._state.get("shortcut_registry", {})
+
+        skipped = await self._try_incremental_skip(
+            platform, registry, last_sync, platform_name, platform_slug,
+            unit_roms, unit_index + 1, total_units,
+        )
+        if not skipped:
+            await self._full_fetch_platform_roms(
+                platform_id, platform_name, platform_slug,
+                unit_roms, unit_index + 1, total_units,
+            )
+
+        self._check_cancelling()
+
+        # Track which ROMs came from this platform
+        for r in unit_roms:
+            synced_rom_ids.add(r["id"])
+
+        # Build shortcut data
+        shortcuts_data = self._build_shortcuts_data(unit_roms)
+
+        # Cache metadata
+        if self._metadata_service is not None:
+            for rom in unit_roms:
+                rom_id_str = str(rom["id"])
+                self._metadata_cache[rom_id_str] = self._metadata_service.extract_metadata(rom)
+                self._metadata_service.mark_metadata_dirty()
+
+        # Download artwork
+        await self._emit_progress(
+            "applying",
+            total=len(unit_roms),
+            message=f"Downloading artwork for {platform_name} 0/{len(unit_roms)}",
+        )
+        cover_paths = await self._download_artwork(unit_roms)
+        for sd in shortcuts_data:
+            sd["cover_path"] = cover_paths.get(sd["rom_id"], "")
+
+        self._check_cancelling()
+
+        # Store pending data for this unit
+        for sd in shortcuts_data:
+            self._pending_sync[sd["rom_id"]] = sd
+
+        # Emit per-unit event
+        await self._emit_progress(
+            "applying",
+            total=len(shortcuts_data),
+            message=f"Applying {platform_name} shortcuts 0/{len(shortcuts_data)}",
+        )
+        await self._emit("sync_apply_unit", {
+            "unit_type": "platform",
+            "unit_name": platform_name,
+            "unit_index": unit_index,
+            "total_units": total_units,
+            "shortcuts": shortcuts_data,
+        })
+
+        self._logger.info(
+            f"Unit {unit_index + 1}/{total_units}: {platform_name} — "
+            f"{len(unit_roms)} ROMs, {len(shortcuts_data)} shortcuts emitted"
+        )
+
+        return unit_roms, shortcuts_data
+
+    async def _sync_one_collection(self, unit, synced_rom_ids, unit_index, total_units):
+        """Sync a single collection unit: fetch ROMs → build shortcuts → artwork → emit.
+
+        Returns (collection_roms, shortcuts_data, collection_name, coll_rom_ids).
+        """
+        collection = unit["_collection"]
+        coll_name = unit["name"]
+
+        # Fetch collection ROMs (dedup against already-synced ROMs)
+        collection_only_roms = []
+        all_seen = set(synced_rom_ids)
+        coll_rom_ids = await self._fetch_single_collection_roms(
+            collection, all_seen, collection_only_roms,
+        )
+
+        self._check_cancelling()
+
+        # Track newly seen ROMs
+        synced_rom_ids.update(r["id"] for r in collection_only_roms)
+
+        # Build shortcut data for collection-only ROMs (not already synced)
+        shortcuts_data = self._build_shortcuts_data(collection_only_roms)
+
+        # Cache metadata
+        if self._metadata_service is not None:
+            for rom in collection_only_roms:
+                rom_id_str = str(rom["id"])
+                self._metadata_cache[rom_id_str] = self._metadata_service.extract_metadata(rom)
+                self._metadata_service.mark_metadata_dirty()
+
+        # Download artwork for collection-only ROMs
+        if collection_only_roms:
+            await self._emit_progress(
+                "applying",
+                total=len(collection_only_roms),
+                message=f"Downloading artwork for {coll_name} 0/{len(collection_only_roms)}",
+            )
+            cover_paths = await self._download_artwork(collection_only_roms)
+            for sd in shortcuts_data:
+                sd["cover_path"] = cover_paths.get(sd["rom_id"], "")
+
+        self._check_cancelling()
+
+        # Store pending data for this unit
+        for sd in shortcuts_data:
+            self._pending_sync[sd["rom_id"]] = sd
+
+        # Emit per-unit event (only collection-only ROMs need shortcuts)
+        if shortcuts_data:
+            await self._emit_progress(
+                "applying",
+                total=len(shortcuts_data),
+                message=f"Applying {coll_name} shortcuts 0/{len(shortcuts_data)}",
+            )
+            await self._emit("sync_apply_unit", {
+                "unit_type": "collection",
+                "unit_name": coll_name,
+                "unit_index": unit_index,
+                "total_units": total_units,
+                "shortcuts": shortcuts_data,
+            })
+
+        self._logger.info(
+            f"Unit {unit_index + 1}/{total_units}: {coll_name} — "
+            f"{len(coll_rom_ids)} ROMs ({len(collection_only_roms)} new), "
+            f"{len(shortcuts_data)} shortcuts emitted"
+        )
+
+        return collection_only_roms, shortcuts_data, coll_name, coll_rom_ids
+
+    async def _wait_for_unit_results(self, timeout_sec=60):
+        """Wait for the frontend to call report_unit_results for the current unit.
+
+        Returns the rom_id_to_app_id dict, or None on timeout.
+        """
+        self._unit_result_event.clear()
+        self._sync_last_heartbeat = time.monotonic()
+
+        while not self._unit_result_event.is_set():
+            try:
+                await asyncio.wait_for(self._unit_result_event.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                elapsed = time.monotonic() - self._sync_last_heartbeat
+                if elapsed > timeout_sec:
+                    self._logger.warning(f"Unit result timeout: no response for {elapsed:.0f}s")
+                    return None
+                # Check for cancellation while waiting
+                if self._sync_state == SyncState.CANCELLING:
+                    return None
+
+        result = self._unit_result_data
+        self._unit_result_data = None
+        return result
+
+    def report_unit_results(self, rom_id_to_app_id):
+        """Called by frontend after processing a sync_apply_unit event.
+
+        Updates the shortcut registry for this unit's ROMs and signals
+        the sync loop to continue with the next unit.
+        """
+        grid = self._steam_config.grid_dir()
+
+        for rom_id_str, app_id in rom_id_to_app_id.items():
+            pending = self._pending_sync.get(int(rom_id_str), {})
+            cover_path = self._finalize_cover_path(grid, pending.get("cover_path", ""), app_id, rom_id_str)
+            self._state["shortcut_registry"][rom_id_str] = self._build_registry_entry(pending, app_id, cover_path)
+
+        # Apply Steam Input mode for new shortcuts
+        steam_input_mode = self._settings.get("steam_input_mode", "default")
+        if steam_input_mode != "default" and rom_id_to_app_id:
+            try:
+                self._steam_config.set_steam_input_config(
+                    [int(aid) for aid in rom_id_to_app_id.values()], mode=steam_input_mode
+                )
+            except Exception as e:
+                self._logger.error(f"Failed to set Steam Input config: {e}")
+
+        # Persist state (crash checkpoint)
+        self._save_state()
+
+        self._logger.info(f"Unit results: {len(rom_id_to_app_id)} shortcuts registered")
+
+        # Signal the sync loop to continue
+        self._unit_result_data = rom_id_to_app_id
+        self._unit_result_event.set()
+
+        # Send heartbeat to keep safety timeout alive
+        self._sync_last_heartbeat = time.monotonic()
+
+        return {"success": True}
+
     # ── Full sync ────────────────────────────────────────────
 
     async def _do_sync(self):
         self._perf.start_sync()
+        self._pending_sync = {}
+        self._unit_result_event = asyncio.Event()
+        self._unit_result_data = None
+
         try:
-            try:
-                fetch_result = await self._fetch_and_prepare()
-                all_roms, shortcuts_data, platforms, collection_memberships, platform_rom_ids = fetch_result
-            except asyncio.CancelledError:
-                await self._finish_sync(_SYNC_CANCELLED)
-                raise
-            except Exception as e:
-                self._logger.error(f"Failed to fetch platforms: {e}")
-                _code, _msg = classify_error(e)
-                await self._emit_progress("error", message=_msg, running=False)
+            # Phase 0: Build work queue
+            await self._emit_progress("platforms", message="Building sync plan...")
+            with self._perf.time_phase("build_work_queue"):
+                work_queue, platforms, _ = await self._build_work_queue()
+
+            self._check_cancelling()
+
+            if not work_queue:
+                await self._emit_progress("done", message="Nothing to sync", running=False)
                 self._sync_state = SyncState.IDLE
                 return
 
-            # Calculate step plan for full sync
-            has_artwork = len(all_roms) > 0
-            has_shortcuts = len(shortcuts_data) > 0
-            full_steps = []
-            if has_artwork:
-                full_steps.append("artwork")
-            if has_shortcuts:
-                full_steps.append("shortcuts")
-            full_total_steps = len(full_steps)
-            full_current_step = 0
+            total_units = len(work_queue)
+            total_roms_estimate = sum(u.get("rom_count", 0) for u in work_queue)
 
-            if has_artwork:
-                full_current_step += 1
-                await self._emit_progress(
-                    "applying",
-                    total=len(all_roms),
-                    message=f"Downloading artwork 0/{len(all_roms)}",
-                    step=full_current_step,
-                    total_steps=full_total_steps,
-                )
-                with self._perf.time_phase("download_artwork"):
-                    cover_paths = await self._download_artwork(
-                        all_roms, progress_step=full_current_step, progress_total_steps=full_total_steps
-                    )
-            else:
-                cover_paths = {}
+            # Emit sync_plan so frontend knows the work queue
+            await self._emit("sync_plan", {
+                "units": [
+                    {"type": u["type"], "name": u["name"], "rom_count": u.get("rom_count", 0)}
+                    for u in work_queue
+                ],
+                "total_roms": total_roms_estimate,
+            })
 
-            if self._sync_state == SyncState.CANCELLING:
-                await self._finish_sync(_SYNC_CANCELLED)
-                return
-
-            for sd in shortcuts_data:
-                sd["cover_path"] = cover_paths.get(sd["rom_id"], "")
-
-            # Determine stale rom_ids by comparing current sync with registry
-            current_rom_ids = {r["id"] for r in all_roms}
-            stale_rom_ids = [int(rid) for rid in self._state["shortcut_registry"] if int(rid) not in current_rom_ids]
-
-            # Emit sync_apply for frontend to process via SteamClient
-            next_step = full_current_step + 1
-            await self._emit_progress(
-                "applying",
-                total=len(shortcuts_data),
-                message=f"Applying shortcuts 0/{len(shortcuts_data)}",
-                step=next_step,
-                total_steps=full_total_steps,
+            self._logger.info(
+                f"Sync plan: {total_units} units, ~{total_roms_estimate} ROMs — "
+                f"{[u['name'] for u in work_queue]}"
             )
 
-            # Save sync stats (registry updated by report_sync_results)
-            self._state["sync_stats"] = {
-                "platforms": len(platforms),
-                "roms": len(all_roms),
-            }
-            self._save_state()
+            # Per-unit processing
+            synced_rom_ids: set[int] = set()
+            platform_rom_ids: set[int] = set()
+            collection_memberships: dict[str, list[int]] = {}
+            all_rom_id_to_app_id: dict[str, int] = {}
 
-            # Store pending data for report_sync_results to reference
-            self._pending_sync = {sd["rom_id"]: sd for sd in shortcuts_data}
+            for unit_index, unit in enumerate(work_queue):
+                self._check_cancelling()
+                unit_type = unit["type"]
+
+                if unit_type == "platform":
+                    with self._perf.time_phase(f"unit_platform_{unit['name']}"):
+                        unit_roms, shortcuts_data = await self._sync_one_platform(
+                            unit, synced_rom_ids, unit_index, total_units,
+                        )
+                        platform_rom_ids.update(r["id"] for r in unit_roms)
+
+                elif unit_type == "collection":
+                    with self._perf.time_phase(f"unit_collection_{unit['name']}"):
+                        _, shortcuts_data, coll_name, coll_rom_ids = await self._sync_one_collection(
+                            unit, synced_rom_ids, unit_index, total_units,
+                        )
+                        if coll_rom_ids:
+                            collection_memberships[coll_name] = coll_rom_ids
+
+                # Wait for frontend to process this unit's shortcuts
+                if shortcuts_data:
+                    unit_result = await self._wait_for_unit_results()
+                    if unit_result is None:
+                        if self._sync_state == SyncState.CANCELLING:
+                            await self._finish_sync(_SYNC_CANCELLED)
+                            return
+                        self._logger.warning(f"Unit {unit_index + 1} timed out, continuing...")
+                    else:
+                        all_rom_id_to_app_id.update(unit_result)
+
+                self._perf.set_gauge("units_completed", unit_index + 1)
+
+            # Flush metadata
+            if self._metadata_service is not None:
+                self._metadata_service.flush_metadata_if_dirty()
+
+            # Final phase: Stale cleanup
+            self._check_cancelling()
+            stale_rom_ids = [
+                int(rid) for rid in self._state["shortcut_registry"]
+                if int(rid) not in synced_rom_ids
+            ]
+
+            if stale_rom_ids:
+                await self._emit("sync_stale", {"remove_rom_ids": stale_rom_ids})
+                self._logger.info(f"Emitted {len(stale_rom_ids)} stale removals")
+                # Wait for frontend to process removals
+                stale_result = await self._wait_for_unit_results(timeout_sec=60)
+                if stale_result is not None:
+                    # stale_result contains removed rom_ids as keys with app_id=0
+                    for rom_id_str in stale_result:
+                        self._state["shortcut_registry"].pop(rom_id_str, None)
+                    self._save_state()
+
+            # Final phase: Build and emit collections
             self._pending_collection_memberships = collection_memberships
             self._pending_platform_rom_ids = platform_rom_ids
 
-            await self._emit(
-                "sync_apply",
-                {
-                    "shortcuts": shortcuts_data,
-                    "remove_rom_ids": stale_rom_ids,
-                    "next_step": next_step,
-                    "total_steps": full_total_steps,
-                },
+            platform_app_ids, romm_collection_app_ids = self._build_collection_app_ids(
+                self._state["shortcut_registry"],
+                platform_rom_ids,
+                collection_memberships,
             )
 
-            self._logger.info(f"Sync data emitted: {len(shortcuts_data)} shortcuts, {len(stale_rom_ids)} stale")
-            self._perf.set_gauge("shortcuts_emitted", len(shortcuts_data))
+            # Save final sync state
+            self._state["sync_stats"] = {
+                "platforms": len(platforms),
+                "roms": len(synced_rom_ids),
+            }
+            self._state["last_sync"] = datetime.now(UTC).isoformat()
+            self._state["last_synced_collections"] = list(collection_memberships.keys())
+            self._state["last_synced_platforms"] = list(platform_app_ids.keys())
+            self._save_state()
+
+            # Emit sync_complete with collection data
+            total = len(self._state["shortcut_registry"])
+            await self._emit("sync_complete", {
+                "platform_app_ids": platform_app_ids,
+                "romm_collection_app_ids": romm_collection_app_ids,
+                "total_games": total,
+            })
+
+            await self._emit_progress(
+                "done",
+                current=total,
+                total=total,
+                message=f"Sync complete: {total} games from {len(platform_app_ids)} platforms",
+                running=False,
+            )
+
+            self._logger.info(f"Sync complete: {total} games, {len(platform_app_ids)} platforms")
+            self._perf.set_gauge("total_roms", len(synced_rom_ids))
+            self._perf.set_gauge("total_platforms", len(platforms))
+            self._perf.set_gauge("shortcuts_emitted", len(all_rom_id_to_app_id))
             self._perf.set_gauge("stale_rom_ids", len(stale_rom_ids))
+
+        except asyncio.CancelledError:
+            await self._finish_sync(_SYNC_CANCELLED)
+            raise
         except Exception as e:
             import traceback
 
@@ -980,9 +1296,10 @@ class LibraryService:
                     self._logger.warning(f"[PerfCollector] Failed to save report: {_e}")
             if self._metadata_service is not None:
                 self._metadata_service.flush_metadata_if_dirty()
+            self._pending_sync = {}
+            self._pending_collection_memberships = {}
+            self._pending_platform_rom_ids = None
             self._sync_state = SyncState.IDLE
-            if self._sync_progress.get("phase") != "error" and self._sync_progress.get("running"):
-                self._start_safety_timeout()
 
     async def _finish_sync(self, message):
         self._sync_progress = {

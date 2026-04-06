@@ -164,6 +164,39 @@ export interface SyncApplyData {
   total_steps?: number;
 }
 
+/** Per-unit pipeline: work queue emitted at sync start */
+export interface SyncPlanUnit {
+  type: "platform" | "collection";
+  id: number | string;
+  name: string;
+  rom_count: number;
+}
+
+export interface SyncPlanData {
+  units: SyncPlanUnit[];
+  total_roms: number;
+}
+
+/** Per-unit pipeline: one unit's shortcuts emitted for processing */
+export interface SyncApplyUnitData {
+  unit_type: "platform" | "collection";
+  unit_name: string;
+  unit_index: number;
+  total_units: number;
+  shortcuts: SyncAddItem[];
+}
+
+/** Per-unit pipeline: stale removals emitted after all units */
+export interface SyncStaleData {
+  remove_rom_ids: number[];
+}
+
+/** Per-unit pipeline: final collections emitted after stale cleanup */
+export interface SyncCollectionsData {
+  platform_app_ids: Record<string, number[]>;
+  romm_collection_app_ids: Record<string, number[]>;
+}
+
 export interface FirmwareFile {
   id: number;
   file_name: string;

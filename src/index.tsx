@@ -253,7 +253,7 @@ export default definePlugin(() => {
     [{ platform_app_ids: Record<string, number[]>; romm_collection_app_ids?: Record<string, number[]>; total_games: number }]
   >("sync_complete", onSyncComplete);
 
-  const syncApplyListener = initSyncManager();
+  const syncApplyListeners = initSyncManager();
 
   // Backend emits sync_progress events throughout _do_sync — update the module-level store
   const syncProgressListener = addEventListener<[SyncProgress]>(
@@ -352,7 +352,9 @@ export default definePlugin(() => {
       unregisterGameDetailPatch();
       unregisterMetadataPatches();
       removeEventListener("sync_complete", syncCompleteListener);
-      removeEventListener("sync_apply", syncApplyListener);
+      removeEventListener("sync_apply_unit", syncApplyListeners.unitListener);
+      removeEventListener("sync_stale", syncApplyListeners.staleListener);
+      removeEventListener("sync_apply", syncApplyListeners.legacyListener);
       removeEventListener("sync_progress", syncProgressListener);
       removeEventListener("download_progress", downloadProgressListener);
       removeEventListener("download_complete", downloadCompleteListener);
