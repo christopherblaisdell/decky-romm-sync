@@ -1,32 +1,73 @@
 #!/usr/bin/env python3
-"""On-Deck performance test — exercises the real sync path against live RomM.
+"""
+═══════════════════════════════════════════════════════════════════════
+  PERFORMANCE TEST METHODOLOGY — decky-romm-sync
+═══════════════════════════════════════════════════════════════════════
 
-Run on the Steam Deck via SSH::
+PURPOSE
+  Measure the real-world performance of the sync pipeline by fetching
+  ROM metadata from the live RomM server.  The instrumented plugin
+  (PerfCollector in py_modules/lib/perf.py) records every production
+  sync automatically — this script is for ad-hoc baseline captures
+  without needing Game Mode.
+
+HOW PERF DATA IS CAPTURED IN PRODUCTION
+  Every sync the plugin runs in Game Mode automatically:
+    1. Logs a formatted report to Decky logs (journalctl -u plugin_loader)
+    2. Writes perf_report.json to the plugin directory
+    3. Exposes get_perf_report() as an RPC method for the frontend
+
+REPRESENTATIVE TEST PLATFORMS (5 platforms, ~3,200 ROMs, ~2 min)
+  Chosen to cover three size tiers and different content profiles:
+
+  ┌─────────────┬────────┬──────────────────────────────────────┐
+  │ Platform    │  ROMs  │ Why included                         │
+  ├─────────────┼────────┼──────────────────────────────────────┤
+  │ dc          │    362 │ SMALL — minimal pagination (8 pages) │
+  │ snes        │    828 │ MEDIUM — moderate pagination         │
+  │ gba         │  1,057 │ MEDIUM-LARGE — tests steady state    │
+  │ psx         │  1,980 │ LARGE — heaviest pagination (40 pgs) │
+  │ switch      │  3,526 │ EXTRA-LARGE — stress test (71 pages) │
+  └─────────────┴────────┴──────────────────────────────────────┘
+
+  Total: ~7,753 ROMs across 5 platforms ≈ 2-3 minutes on LAN.
+
+  These 5 platforms exercise:
+    - API pagination at varying depths (8 to 71 pages)
+    - Mixed content types (disc-based, cartridge, modern)
+    - The RomM server's ability to handle back-to-back queries
+
+REPRESENTATIVE COLLECTIONS (checked but not ROM-fetched)
+  Collections are fetched as a single list (~101 items, <1s).
+  No per-collection ROM fetching is done in this test.
+
+WHAT THIS DOES NOT TEST
+  - Actual ROM file downloads (network I/O for multi-GB files)
+  - Steam shortcut creation (requires Steam running)
+  - Artwork download at scale (only 3 sample covers)
+  - Concurrent/parallel fetching (sequential by design)
+
+RUNNING THIS SCRIPT
+  From deployed plugin on Deck::
 
     cd ~/homebrew/plugins/decky-romm-sync
     python3 scripts/deck_perf_test.py
 
-Or from Windows::
+  From a temp copy on Deck::
 
     scp -r decky-romm-sync/ deck@192.168.0.84:/tmp/perf-test/
     ssh deck@192.168.0.84 "cd /tmp/perf-test && python3 scripts/deck_perf_test.py"
 
-Exercises:
-  1. Platform listing (API latency)
-  2. Paginated ROM fetching for 6 target platforms (~6,700 ROMs)
-  3. Collection listing
-  4. Shortcut data preparation (CPU-bound)
-  5. Single artwork download (network throughput)
+  Environment variable overrides::
 
-Outputs a structured JSON report to /tmp/perf_baseline.json and prints
-a human-readable summary to stdout.
+    ROMM_URL=http://host:8098  ROMM_USER=user  ROMM_PASS=pass
+    PERF_OUTPUT=/path/to/output.json
 
-Timeout: 10 minutes total. Individual HTTP requests timeout at 30s.
+═══════════════════════════════════════════════════════════════════════
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
@@ -41,7 +82,6 @@ _py_modules = os.path.join(_project_root, "py_modules")
 sys.path.insert(0, _py_modules)
 
 from adapters.romm.http import RommHttpAdapter
-from adapters.romm.api_router import ApiRouter
 from domain.shortcut_data import build_shortcuts_data
 from lib.perf import PerfCollector
 
@@ -52,10 +92,10 @@ ROMM_USER = os.environ.get("ROMM_USER", "cblaisdell")
 ROMM_PASS = os.environ.get("ROMM_PASS", "comcast")
 OUTPUT_PATH = os.environ.get("PERF_OUTPUT", "/tmp/perf_baseline.json")
 
-# 6 target platforms for baseline measurement
-TARGET_PLATFORM_SLUGS = {"nes", "snes", "psx", "dc", "psp", "gba"}
+# See methodology above for rationale
+TARGET_PLATFORM_SLUGS = {"dc", "snes", "gba", "psx", "switch"}
 
-TOTAL_TIMEOUT_SEC = 600  # 10 minute hard ceiling
+TOTAL_TIMEOUT_SEC = 300  # 5 minute hard ceiling (expect ~2-3 min)
 
 # ── Logging ──────────────────────────────────────────────────
 

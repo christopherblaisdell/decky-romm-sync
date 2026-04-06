@@ -5,6 +5,17 @@ counters, and gauges — and ``ETAEstimator`` for throughput-based
 remaining-time estimation.
 
 Both classes are pure Python with no external dependencies.
+
+Production usage
+~~~~~~~~~~~~~~~~
+Every sync automatically records perf data:
+  - Formatted report logged to Decky logs
+  - JSON written to ``<plugin_dir>/perf_report.json``
+  - Available via ``get_perf_report()`` RPC
+
+Ad-hoc baseline: ``python3 scripts/deck_perf_test.py``
+See that script's docstring for the full test methodology and
+representative platform selection rationale.
 """
 
 from __future__ import annotations
