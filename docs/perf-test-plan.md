@@ -16,38 +16,29 @@ The instrumentation lives in `py_modules/lib/perf.py` (PerfCollector + ETAEstima
 
 ## Representative Test Platforms
 
-These 3 platforms were selected to cover different size tiers while keeping total sync time under ~5 minutes:
+Drastically reduced from the original 3-platform set (3,170 ROMs) to 1 platform to ensure syncs complete reliably without Decky frontend reloads killing the process.
 
-| Platform       | ROMs  | Tier   | Why Included                          |
-|----------------|-------|--------|---------------------------------------|
-| dc (Dreamcast) | 362   | Small  | Minimal pagination (~8 pages)         |
-| snes           | 828   | Medium | Moderate pagination, cartridge-based  |
-| psx            | 1,980 | Large  | Heavy pagination (~40 pages), disc-based |
+| Platform       | ID | ROMs  | Why Included                          |
+|----------------|-----|-------|---------------------------------------|
+| dc (Dreamcast) | 4   | 362   | Exercises pagination (~8 pages), small enough to complete in minutes |
 
-**Total: ~3,170 ROMs across 3 platforms.**
-
-These platforms exercise:
-- API pagination at varying depths (8 to 40 pages)
-- Mixed content types (disc-based, cartridge)
-- The RomM server's ability to handle back-to-back queries
+**Total: ~362 ROMs across 1 platform.**
 
 ## Representative Collections
 
-These 4 collections were selected to cover different sizes while keeping sync time manageable:
+Reduced from 4 collections (177 ROMs) to 1, already proven to sync successfully.
 
-| Collection                 | ROMs | Tier   | Why Included                                  |
-|----------------------------|------|--------|-----------------------------------------------|
-| Best of Metroid            | 11   | Tiny   | Single-page fetch, franchise collection       |
-| Best of Castlevania        | 23   | Small  | Small multi-franchise, quick pagination       |
-| Best of Nintendo 64        | 42   | Medium | Single-platform "best of"                     |
-| Best of SNES               | 101  | Large  | Moderate pagination (~2 pages)                |
+| Collection                 | ID | ROMs | Why Included                                  |
+|----------------------------|-----|------|-----------------------------------------------|
+| Best of Metroid            | 90  | 11   | Single-page fetch, proven end-to-end (April 5, 2026) |
 
-**Total: ~177 ROMs across 4 collections** (some overlap with platform ROMs is expected).
+**Total: ~11 ROMs across 1 collection** (some overlap with platform ROMs expected).
 
-These collections exercise:
-- Per-collection ROM fetching at varying depths (1 to 2 pages)
-- Franchise vs. platform-based collections
-- Overlap deduplication (ROMs already seen via platform sync)
+## Why This Small?
+
+The original 3-platform + 4-collection test set (~3,347 ROMs) caused two consecutive sync failures on April 5, 2026. The shortcut application phase (Phase 4) takes ~50ms per ROM in the frontend, meaning 3,241 shortcuts required ~30+ minutes of uninterrupted frontend processing. Decky reloads the frontend every ~20 minutes, killing the sync mid-flight.
+
+This reduced set (~370 ROMs) should complete the full pipeline in ~5 minutes, well within the Decky reload window. Once Feature 2 (per-unit pipeline) is implemented, the test set can be expanded back since each unit syncs independently.
 
 ## Test Procedure
 
