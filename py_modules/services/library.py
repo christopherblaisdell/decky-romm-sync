@@ -968,6 +968,14 @@ class LibraryService:
             self._perf.end_sync()
             if self._perf.wall_time > 0:
                 self._logger.info(f"[PerfCollector] {self._perf.format_report()}")
+                try:
+                    import json as _json
+                    _perf_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "perf_report.json")
+                    with open(_perf_path, "w") as _f:
+                        _json.dump(self._perf.generate_report(), _f, indent=2)
+                    self._logger.info(f"[PerfCollector] Report saved to {_perf_path}")
+                except Exception as _e:
+                    self._logger.warning(f"[PerfCollector] Failed to save report: {_e}")
             if self._metadata_service is not None:
                 self._metadata_service.flush_metadata_if_dirty()
             self._sync_state = SyncState.IDLE
