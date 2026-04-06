@@ -18,11 +18,11 @@ The instrumentation lives in `py_modules/lib/perf.py` (PerfCollector + ETAEstima
 
 These 3 platforms were selected to cover different size tiers while keeping total sync time under ~5 minutes:
 
-| Platform | ROMs  | Tier   | Why Included                          |
-|----------|-------|--------|---------------------------------------|
-| dc       | 362   | Small  | Minimal pagination (~8 pages)         |
-| snes     | 828   | Medium | Moderate pagination, cartridge-based  |
-| psx      | 1,980 | Large  | Heavy pagination (~40 pages), disc-based |
+| Platform       | ROMs  | Tier   | Why Included                          |
+|----------------|-------|--------|---------------------------------------|
+| dc (Dreamcast) | 362   | Small  | Minimal pagination (~8 pages)         |
+| snes           | 828   | Medium | Moderate pagination, cartridge-based  |
+| psx            | 1,980 | Large  | Heavy pagination (~40 pages), disc-based |
 
 **Total: ~3,170 ROMs across 3 platforms.**
 
