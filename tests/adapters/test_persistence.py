@@ -317,3 +317,88 @@ class TestLoadingEdgeCases:
         settings_path = os.path.join(adapter._settings_dir, "settings.json")
         mode = os.stat(settings_path).st_mode & 0o777
         assert mode == 0o600
+
+
+# ── State backup & recovery ───────────────────────────────────────────────────
+
+
+class TestStateBackupRecovery:
+    def test_save_state_creates_prev_file(self, adapter):
+        """First save has no .prev, second save should rotate the first to .prev."""
+        adapter.save_state({"shortcut_registry": {"1": {"app_id": 100}}})
+        prev_path = os.path.join(adapter._runtime_dir, "state.json.prev")
+        assert not os.path.exists(prev_path)  # No .prev on first write (no prior file)
+
+        adapter.save_state({"shortcut_registry": {"1": {"app_id": 200}}})
+        assert os.path.exists(prev_path)
+        with open(prev_path) as f:
+            prev = json.load(f)
+        assert prev["shortcut_registry"]["1"]["app_id"] == 100
+
+    def test_save_state_rotates_prev_on_each_write(self, adapter):
+        """Each save replaces .prev with the previous state."""
+        adapter.save_state({"shortcut_registry": {"1": {"app_id": 100}}})
+        adapter.save_state({"shortcut_registry": {"1": {"app_id": 200}}})
+        adapter.save_state({"shortcut_registry": {"1": {"app_id": 300}}})
+
+        prev_path = os.path.join(adapter._runtime_dir, "state.json.prev")
+        with open(prev_path) as f:
+            prev = json.load(f)
+        # .prev should be the second save (app_id=200), not the first
+        assert prev["shortcut_registry"]["1"]["app_id"] == 200
+
+    def test_load_state_recovers_from_empty_registry(self, adapter):
+        """If state.json has empty registry but .prev has entries, auto-recover."""
+        defaults = {"shortcut_registry": {}}
+        # Write a good state, then an empty one (simulates corruption/crash)
+        adapter.save_state({"shortcut_registry": {"1": {"app_id": 100}, "2": {"app_id": 200}}})
+        adapter.save_state({"shortcut_registry": {}})
+
+        result = adapter.load_state(defaults)
+        # Should recover from .prev
+        assert len(result["shortcut_registry"]) == 2
+        assert result["shortcut_registry"]["1"]["app_id"] == 100
+
+    def test_load_state_no_recovery_when_registry_has_entries(self, adapter):
+        """Normal case: state.json has entries, .prev is ignored."""
+        defaults = {"shortcut_registry": {}}
+        adapter.save_state({"shortcut_registry": {"1": {"app_id": 100}}})
+        adapter.save_state({"shortcut_registry": {"2": {"app_id": 200}}})
+
+        result = adapter.load_state(defaults)
+        # Should use current state, not .prev
+        assert "2" in result["shortcut_registry"]
+        assert "1" not in result["shortcut_registry"]
+
+    def test_load_state_no_recovery_when_no_prev_file(self, adapter):
+        """Empty registry with no .prev file — returns defaults."""
+        defaults = {"shortcut_registry": {}}
+        state_path = os.path.join(adapter._runtime_dir, "state.json")
+        with open(state_path, "w") as f:
+            json.dump({"shortcut_registry": {}, "version": _STATE_VERSION}, f)
+
+        result = adapter.load_state(defaults)
+        assert result["shortcut_registry"] == {}
+
+    def test_load_state_no_recovery_when_prev_also_empty(self, adapter):
+        """Both state.json and .prev have empty registries — no recovery."""
+        defaults = {"shortcut_registry": {}}
+        # Write empty, then empty again
+        adapter.save_state({"shortcut_registry": {}})
+        adapter.save_state({"shortcut_registry": {}})
+
+        result = adapter.load_state(defaults)
+        assert result["shortcut_registry"] == {}
+
+    def test_load_state_no_recovery_when_prev_is_corrupt(self, adapter):
+        """state.json empty, .prev is corrupt JSON — no recovery, no crash."""
+        defaults = {"shortcut_registry": {}}
+        state_path = os.path.join(adapter._runtime_dir, "state.json")
+        prev_path = state_path + ".prev"
+        with open(state_path, "w") as f:
+            json.dump({"shortcut_registry": {}, "version": _STATE_VERSION}, f)
+        with open(prev_path, "w") as f:
+            f.write("CORRUPT{{{")
+
+        result = adapter.load_state(defaults)
+        assert result["shortcut_registry"] == {}

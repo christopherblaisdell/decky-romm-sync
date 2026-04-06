@@ -122,8 +122,13 @@ class PersistenceAdapter:
 
         Returns the merged dict.  If the file is missing or corrupt the
         returned dict is a copy of *defaults* with the version stamp.
+
+        **Auto-recovery:** if the loaded state has an empty
+        ``shortcut_registry`` but ``state.json.prev`` has a non-empty one,
+        the previous state is used instead and a warning is logged.
         """
         state_path = os.path.join(self._runtime_dir, "state.json")
+        prev_path = state_path + ".prev"
         state = dict(defaults)
         try:
             with open(state_path) as f:
@@ -136,12 +141,42 @@ class PersistenceAdapter:
         except (FileNotFoundError, json.JSONDecodeError):
             pass
         state.setdefault("version", _STATE_VERSION)
+
+        # Auto-recover from .prev if current state lost its shortcut registry
+        registry = state.get("shortcut_registry", {})
+        if not registry:
+            try:
+                with open(prev_path) as f:
+                    prev_saved = json.load(f)
+                if isinstance(prev_saved, dict):
+                    prev_registry = prev_saved.get("shortcut_registry", {})
+                    if prev_registry:
+                        self._logger.warning(
+                            "state.json has empty shortcut_registry but "
+                            "state.json.prev has %d entries — auto-recovering",
+                            len(prev_registry),
+                        )
+                        state.update(prev_saved)
+                        state.setdefault("version", _STATE_VERSION)
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+
         return state
 
     def save_state(self, data: dict) -> None:
-        """Atomic write of *data* to ``state.json`` with flock, stamping version."""
+        """Atomic write of *data* to ``state.json`` with flock, stamping version.
+
+        Before writing, the current ``state.json`` is rotated to
+        ``state.json.prev`` so the previous state can be recovered if the
+        new write is empty or corrupt.
+        """
         data["version"] = _STATE_VERSION
         state_path = os.path.join(self._runtime_dir, "state.json")
+        prev_path = state_path + ".prev"
+        # Rotate current → .prev before overwriting
+        if os.path.exists(state_path):
+            with contextlib.suppress(OSError):
+                os.replace(state_path, prev_path)
         self._locked_write(state_path, data)
 
     # ------------------------------------------------------------------
