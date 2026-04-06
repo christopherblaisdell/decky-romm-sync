@@ -16,50 +16,44 @@ The instrumentation lives in `py_modules/lib/perf.py` (PerfCollector + ETAEstima
 
 ## Representative Test Platforms
 
-These 5 platforms were selected to cover three size tiers and exercise different pagination depths against the RomM API:
+These 3 platforms were selected to cover different size tiers while keeping total sync time under ~5 minutes:
 
-| Platform | ROMs  | Tier         | Why Included                          |
-|----------|-------|--------------|---------------------------------------|
-| dc       | 362   | Small        | Minimal pagination (~8 pages)         |
-| snes     | 828   | Medium       | Moderate pagination                   |
-| gba      | 1,057 | Medium-Large | Tests steady-state throughput         |
-| psx      | 1,980 | Large        | Heavy pagination (~40 pages)          |
-| switch   | 3,526 | Extra-Large  | Stress test (~71 pages)               |
+| Platform | ROMs  | Tier   | Why Included                          |
+|----------|-------|--------|---------------------------------------|
+| dc       | 362   | Small  | Minimal pagination (~8 pages)         |
+| snes     | 828   | Medium | Moderate pagination, cartridge-based  |
+| psx      | 1,980 | Large  | Heavy pagination (~40 pages), disc-based |
 
-**Total: ~7,753 ROMs across 5 platforms.**
+**Total: ~3,170 ROMs across 3 platforms.**
 
 These platforms exercise:
-- API pagination at varying depths (8 to 71 pages)
-- Mixed content types (disc-based, cartridge, modern)
+- API pagination at varying depths (8 to 40 pages)
+- Mixed content types (disc-based, cartridge)
 - The RomM server's ability to handle back-to-back queries
 
 ## Representative Collections
 
-These 8 collections were selected to cover the full range of sizes. Collections trigger per-collection ROM fetches, so larger collections add real pagination load.
+These 4 collections were selected to cover different sizes while keeping sync time manageable:
 
-| Collection                 | ROMs | Tier         | Why Included                                  |
-|----------------------------|------|--------------|-----------------------------------------------|
-| Best of Metroid            | 11   | Tiny         | Single-page fetch, franchise collection       |
-| Best of Castlevania        | 23   | Small        | Small multi-franchise, quick pagination       |
-| Best of Nintendo 64        | 42   | Small-Medium | Single-platform "best of"                     |
-| Best of SNES               | 101  | Medium       | Moderate pagination (~2 pages)                |
-| Best of Wii                | 115  | Medium       | Disc-based platform collection                |
-| Best of PS2                | 185  | Large        | Heaviest single-platform collection           |
-| Best of RPGs               | 248  | Large        | Cross-platform genre, heavy pagination (~5 pages) |
-| Best of Xbox 360           | 384  | Extra-Large  | Largest collection, stress test (~8 pages)    |
+| Collection                 | ROMs | Tier   | Why Included                                  |
+|----------------------------|------|--------|-----------------------------------------------|
+| Best of Metroid            | 11   | Tiny   | Single-page fetch, franchise collection       |
+| Best of Castlevania        | 23   | Small  | Small multi-franchise, quick pagination       |
+| Best of Nintendo 64        | 42   | Medium | Single-platform "best of"                     |
+| Best of SNES               | 101  | Large  | Moderate pagination (~2 pages)                |
 
-**Total: ~1,109 ROMs across 8 collections** (some overlap with platform ROMs is expected).
+**Total: ~177 ROMs across 4 collections** (some overlap with platform ROMs is expected).
 
 These collections exercise:
-- Per-collection ROM fetching at varying depths (1 to 8 pages)
-- Single-platform vs. cross-platform genre collections
+- Per-collection ROM fetching at varying depths (1 to 2 pages)
+- Franchise vs. platform-based collections
 - Overlap deduplication (ROMs already seen via platform sync)
 
 ## Test Procedure
 
 1. Open Game Mode on Steam Deck
 2. Press `...` (QAM) → decky-romm-sync
-3. Enable the 5 representative platforms and 8 representative collections
+3. Enable the 3 representative platforms and 4 representative collections
 4. Run a sync
 5. After the sync completes, retrieve perf data:
    - **From Decky logs:** `ssh deck@192.168.0.84 "echo comcast | sudo -S journalctl -u plugin_loader.service --no-pager -n 50"`
