@@ -1,0 +1,36 @@
+{
+  "timestamp": "2026-04-05T18:05:19",
+  "version": "0.15.0",
+  "report": {
+    "wall_time": 647.859,
+    "phases": {
+      "fetch_platforms": 0.344,
+      "fetch_roms": 647.14,
+      "fetch_collections": 0.344,
+      "download_artwork_sample": 0.031
+    },
+    "http": {
+      "total_requests": 1321,
+      "total_bytes": 234209942,
+      "total_time": 647.767,
+      "errors": 0,
+      "by_method": {
+        "GET": {
+          "count": 1321,
+          "total_time": 647.7670000000508,
+          "total_bytes": 234209942
+        }
+      }
+    },
+    "counters": {
+      "platforms_fetched": 90
+    },
+    "gauges": {
+      "platforms_total": 90,
+      "roms_total": 63329,
+      "covers_downloaded_sample": 3
+    }
+  },
+  "platforms": 90,
+  "roms": 63329
+}
