@@ -18,7 +18,7 @@ import { unregisterGameDetailPatch, registerRomMAppId } from "./patches/gameDeta
 import { registerMetadataPatches, unregisterMetadataPatches, applyAllPlaytime } from "./patches/metadataPatches";
 import { registerLaunchInterceptor, unregisterLaunchInterceptor } from "./utils/launchInterceptor";
 import { getAllMetadataCache, getAppIdRomIdMap, ensureDeviceRegistered, getSaveSyncSettings, getAllPlaytime, getMigrationStatus, getSaveSortMigrationStatus, logError, logInfo } from "./api/backend";
-import { createOrUpdateCollections, createOrUpdateRomMCollections, clearPlatformCollection, getHostname } from "./utils/collections";
+import { createOrUpdateCollections, createOrUpdateRomMCollections, clearPlatformCollection, isCollectionSafeToDelete, getHostname } from "./utils/collections";
 import { setMigrationStatus } from "./utils/migrationStore";
 import { setSaveSortMigrationStatus } from "./utils/saveSortMigrationStore";
 import { initSessionManager, destroySessionManager } from "./utils/sessionManager";
@@ -226,8 +226,10 @@ export default definePlugin(() => {
             return match ? !activeNames.has(match[1]) : false;
           });
           for (const c of staleRomm) {
-            logInfo(`Removing stale RomM collection "${c.displayName}"`);
-            await c.Delete();
+            if (isCollectionSafeToDelete(c)) {
+              logInfo(`Removing stale RomM collection "${c.displayName}"`);
+              await c.Delete();
+            }
           }
         }
       } catch (e) {

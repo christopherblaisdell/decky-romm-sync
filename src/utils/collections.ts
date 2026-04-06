@@ -8,6 +8,39 @@
 
 import { logInfo, logWarn, logError } from "../api/backend";
 
+/**
+ * Steam system collection IDs that must NEVER be deleted or drained.
+ * These are built-in Steam Library collections (Favorites, Hidden, etc.).
+ * Deleting them corrupts the user's Steam Library state.
+ */
+const SYSTEM_COLLECTION_IDS = new Set([
+  "favorite",
+  "hidden",
+  "uncategorized",
+  "recent-activity",
+  "all",
+  "local-games",
+  "remote-play",
+]);
+
+/**
+ * Returns true if the collection name matches the RomM naming convention.
+ * RomM collections always start with "RomM: " — system collections never do.
+ */
+export function isRomMCollection(displayName: string): boolean {
+  return displayName.startsWith("RomM: ");
+}
+
+/**
+ * Returns true if a collection is safe to delete — i.e., it's a RomM collection
+ * and NOT a Steam system collection.
+ */
+export function isCollectionSafeToDelete(collection: { id: string; displayName: string }): boolean {
+  if (SYSTEM_COLLECTION_IDS.has(collection.id)) return false;
+  if (!isRomMCollection(collection.displayName)) return false;
+  return true;
+}
+
 let _hostname = "";
 
 export async function getHostname(): Promise<string> {
@@ -152,8 +185,12 @@ export async function clearPlatformCollection(platformName: string): Promise<voi
       (c) => c.displayName === scopedName
     );
     if (scoped) {
-      logInfo(`Deleting collection "${scopedName}" (id=${scoped.id})`);
-      await scoped.Delete();
+      if (isCollectionSafeToDelete(scoped)) {
+        logInfo(`Deleting collection "${scopedName}" (id=${scoped.id})`);
+        await scoped.Delete();
+      } else {
+        logWarn(`Refusing to delete collection "${scopedName}" (id=${scoped.id}) — system or non-RomM collection`);
+      }
     }
 
     // Also clean up legacy collection (without hostname suffix) if it exists
@@ -161,8 +198,12 @@ export async function clearPlatformCollection(platformName: string): Promise<voi
       (c) => c.displayName === legacyName
     );
     if (legacy) {
-      logInfo(`Deleting legacy collection "${legacyName}" (id=${legacy.id})`);
-      await legacy.Delete();
+      if (isCollectionSafeToDelete(legacy)) {
+        logInfo(`Deleting legacy collection "${legacyName}" (id=${legacy.id})`);
+        await legacy.Delete();
+      } else {
+        logWarn(`Refusing to delete collection "${legacyName}" (id=${legacy.id}) — system or non-RomM collection`);
+      }
     }
 
     if (!scoped && !legacy) {
@@ -198,6 +239,10 @@ export async function clearAllRomMCollections(): Promise<void> {
 
     logInfo(`Deleting ${rommCollections.length} RomM collections (hostname: ${hostname})`);
     for (const c of rommCollections) {
+      if (!isCollectionSafeToDelete(c)) {
+        logWarn(`Refusing to delete collection "${c.displayName}" (id=${c.id}) — system or non-RomM collection`);
+        continue;
+      }
       logInfo(`Deleting collection "${c.displayName}" (id=${c.id})`);
       await c.Delete();
     }
