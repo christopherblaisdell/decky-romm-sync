@@ -54,3 +54,54 @@ PerfCollector + ETAEstimator — phase timing, HTTP tracking, counters, gauges, 
 - Create a "Real Non-Steam Games" collection that users manually curate, and recommend using the Collections tab as the primary view
 
 **Design doc:** None yet — research phase
+
+---
+
+### Feature 4: Sync UX Overhaul — Per-Platform Accordion
+
+**Problem:** The current sync UI shows an abstract 4-phase stepper with an indeterminate spinner during the fetch phase (60–80% of sync time). Users have no idea which platform is syncing, how far along it is, or how long remains.
+
+**Solution:** Replace the stepper with a per-platform accordion that shows real-time progress per platform. Each platform row transitions through `○ pending → ⟳ active → ✓ done`. Only the active platform is expanded, showing a progress bar, current game title, cover art thumbnail, and per-platform ETA.
+
+**Dependency:** Feature 2 (Per-Unit Sync Pipeline) — the accordion needs per-platform events (`sync_plan`, `sync_apply_platform`) which Feature 2 provides.
+
+**Wireframe:**
+
+```
+┌─────────────────────────────────────────┐
+│  ✓  Dreamcast               362/362    │  ← completed (collapsed)
+│  ⟳  PlayStation             142/1978   │  ← active (EXPANDED)
+│     ████████░░░░░░░░░░░░░░             │
+│     ┌──────┐                            │
+│     │cover │  Crash Bandicoot 3         │
+│     │ art  │  ~4m remaining             │
+│     └──────┘                            │
+│  ○  SNES                     0/830     │  ← pending (collapsed)
+│  ○  Best of Metroid           0/11     │  ← pending (collapsed)
+│                                         │
+│  2 of 4 units · ~12m remaining          │
+│  [ Cancel Sync ]                        │
+└─────────────────────────────────────────┘
+```
+
+**Key states:**
+- **Connecting** (~1s): Indeterminate spinner + "Connecting to RomM..."
+- **Fetching Library** (5–20s): All platforms listed as `○` pending, compact header with overall fetch progress
+- **Applying Per-Platform** (main state): One platform expanded, cover art cycling, per-platform ETA, footer with global ETA
+- **Collections Phase**: After all platforms `✓`, separate section: "Building collections... 5/8"
+- **Complete**: All rows `✓`, summary: "✓ Sync complete — 5,320 games · 14 platforms · 8 collections · 6m12s elapsed"
+- **Cancelled**: Active platform shows partial with `✗`, unprocessed stay `○`
+- **Truncation (14+ platforms)**: Show active + 2 nearest completed + 2 nearest pending, collapse rest into summary rows
+
+**Scope:**
+- `SyncAccordion.tsx` — new React component (~400 lines)
+- `syncAccordion.ts` — state management (~150 lines)
+- `MainPage.tsx` — swap progress section for accordion
+- `types/index.ts` — SyncPlan type, SyncAccordionState
+- `library.py` — emit `sync_plan` event (may already exist from Feature 2)
+
+**Risk:** Low-moderate — frontend-only rendering change, but substantial new component
+
+**PR size:** ~700 lines
+
+**Origin:** Consolidated from archived Features 10 (fetch progress bar), 11 (per-platform accordion), and 13 (interleaved artwork) from the April 5, 2026 archived roadmap.
