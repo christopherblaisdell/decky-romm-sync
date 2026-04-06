@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from domain.shortcut_data import build_registry_entry, build_shortcuts_data
 from domain.sync_state import SyncState
 from lib.errors import RommUnsupportedError, classify_error
+from lib.perf import ETAEstimator, PerfCollector
 
 if TYPE_CHECKING:
     import logging
@@ -73,6 +74,10 @@ class LibraryService:
         self._metadata_service = metadata_service
         self._artwork = artwork
 
+        # Performance instrumentation
+        self._perf = PerfCollector()
+        self._eta = ETAEstimator()
+
         # Sync-specific state (owned by this service)
         self._sync_state = SyncState.IDLE
         self._sync_last_heartbeat = 0.0
@@ -102,6 +107,21 @@ class LibraryService:
         """Request graceful shutdown — cancels sync if running."""
         if self._sync_state == SyncState.RUNNING:
             self._sync_state = SyncState.CANCELLING
+
+    @property
+    def perf(self) -> PerfCollector:
+        """Expose PerfCollector for external wiring (e.g. http adapter)."""
+        return self._perf
+
+    def get_perf_report(self) -> dict:
+        """Return the performance report from the most recent sync."""
+        if self._perf.wall_time > 0:
+            return {
+                "success": True,
+                "report": self._perf.generate_report(),
+                "formatted": self._perf.format_report(),
+            }
+        return {"success": False, "message": "No performance data available"}
 
     # ── Platform & ROM fetching ──────────────────────────────
 
@@ -787,7 +807,8 @@ class LibraryService:
 
         # Phase 1: Fetch platforms
         await self._emit_progress("platforms", message="Fetching platforms...")
-        platforms = await self._fetch_enabled_platforms()
+        with self._perf.time_phase("fetch_platforms"):
+            platforms = await self._fetch_enabled_platforms()
         self._check_cancelling()
 
         # Phase 2: Fetch ROMs per platform (incremental if possible)
@@ -797,40 +818,46 @@ class LibraryService:
 
         all_roms: list[dict] = []
         total_platforms = len(platforms)
-        for pi, platform in enumerate(platforms, 1):
-            self._check_cancelling()
-            platform_name = platform.get("name", platform.get("display_name", "Unknown"))
-            platform_slug = platform.get("slug", "")
+        with self._perf.time_phase("fetch_roms"):
+            for pi, platform in enumerate(platforms, 1):
+                self._check_cancelling()
+                platform_name = platform.get("name", platform.get("display_name", "Unknown"))
+                platform_slug = platform.get("slug", "")
 
-            skipped = await self._try_incremental_skip(
-                platform, registry, last_sync, platform_name, platform_slug, all_roms, pi, total_platforms
-            )
-            if not skipped:
-                await self._full_fetch_platform_roms(
-                    platform["id"], platform_name, platform_slug, all_roms, pi, total_platforms
+                skipped = await self._try_incremental_skip(
+                    platform, registry, last_sync, platform_name, platform_slug, all_roms, pi, total_platforms
                 )
+                if not skipped:
+                    await self._full_fetch_platform_roms(
+                        platform["id"], platform_name, platform_slug, all_roms, pi, total_platforms
+                    )
 
         self._check_cancelling()
         self._logger.info(f"Fetched {len(all_roms)} ROMs from {len(platforms)} platforms")
+        self._perf.set_gauge("total_roms", len(all_roms))
+        self._perf.set_gauge("total_platforms", len(platforms))
 
         # Record which rom_ids came from platforms
         platform_rom_ids: set[int] = {r["id"] for r in all_roms}
 
         # Phase 3: Fetch collection ROMs (adds ROMs not already in all_roms)
-        collection_only_roms, collection_memberships = await self._fetch_collection_roms(platform_rom_ids)
+        with self._perf.time_phase("fetch_collections"):
+            collection_only_roms, collection_memberships = await self._fetch_collection_roms(platform_rom_ids)
         all_roms.extend(collection_only_roms)
 
         # Phase 4: Prepare shortcut data
-        shortcuts_data = self._build_shortcuts_data(all_roms)
+        with self._perf.time_phase("prepare_shortcuts"):
+            shortcuts_data = self._build_shortcuts_data(all_roms)
         self._check_cancelling()
 
         # Cache metadata from sync response
-        if self._metadata_service is not None:
-            for rom in all_roms:
-                rom_id_str = str(rom["id"])
-                self._metadata_cache[rom_id_str] = self._metadata_service.extract_metadata(rom)
-                self._metadata_service.mark_metadata_dirty()
-            self._metadata_service.flush_metadata_if_dirty()
+        with self._perf.time_phase("cache_metadata"):
+            if self._metadata_service is not None:
+                for rom in all_roms:
+                    rom_id_str = str(rom["id"])
+                    self._metadata_cache[rom_id_str] = self._metadata_service.extract_metadata(rom)
+                    self._metadata_service.mark_metadata_dirty()
+                self._metadata_service.flush_metadata_if_dirty()
         self._log_debug(f"Metadata cached for {len(all_roms)} ROMs")
 
         return all_roms, shortcuts_data, platforms, collection_memberships, platform_rom_ids
@@ -838,6 +865,7 @@ class LibraryService:
     # ── Full sync ────────────────────────────────────────────
 
     async def _do_sync(self):
+        self._perf.start_sync()
         try:
             try:
                 fetch_result = await self._fetch_and_prepare()
@@ -872,9 +900,10 @@ class LibraryService:
                     step=full_current_step,
                     total_steps=full_total_steps,
                 )
-                cover_paths = await self._download_artwork(
-                    all_roms, progress_step=full_current_step, progress_total_steps=full_total_steps
-                )
+                with self._perf.time_phase("download_artwork"):
+                    cover_paths = await self._download_artwork(
+                        all_roms, progress_step=full_current_step, progress_total_steps=full_total_steps
+                    )
             else:
                 cover_paths = {}
 
@@ -922,6 +951,8 @@ class LibraryService:
             )
 
             self._logger.info(f"Sync data emitted: {len(shortcuts_data)} shortcuts, {len(stale_rom_ids)} stale")
+            self._perf.set_gauge("shortcuts_emitted", len(shortcuts_data))
+            self._perf.set_gauge("stale_rom_ids", len(stale_rom_ids))
         except Exception as e:
             import traceback
 
@@ -936,6 +967,17 @@ class LibraryService:
             }
             self._loop.create_task(self._emit("sync_progress", self._sync_progress))
         finally:
+            self._perf.end_sync()
+            if self._perf.wall_time > 0:
+                self._logger.info(f"[PerfCollector] {self._perf.format_report()}")
+                try:
+                    import json as _json
+                    _perf_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "perf_report.json")
+                    with open(_perf_path, "w") as _f:
+                        _json.dump(self._perf.generate_report(), _f, indent=2)
+                    self._logger.info(f"[PerfCollector] Report saved to {_perf_path}")
+                except Exception as _e:
+                    self._logger.warning(f"[PerfCollector] Failed to save report: {_e}")
             if self._metadata_service is not None:
                 self._metadata_service.flush_metadata_if_dirty()
             self._sync_state = SyncState.IDLE

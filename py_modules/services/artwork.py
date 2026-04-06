@@ -81,9 +81,17 @@ class ArtworkService:
             return cover_paths
 
         total = len(all_roms)
+        artwork_downloaded = 0
+        artwork_skipped = 0
+        artwork_failed = 0
+        artwork_no_url = 0
+        log_interval = max(1, total // 10)  # Log every ~10%
+
+        self._logger.info(f"[Artwork] Starting: {total} ROMs to process")
 
         for i, rom in enumerate(all_roms):
             if is_cancelling():
+                self._logger.info(f"[Artwork] Cancelled at {i}/{total} (downloaded={artwork_downloaded}, skipped={artwork_skipped})")
                 return cover_paths
 
             await emit_progress(
@@ -97,21 +105,30 @@ class ArtworkService:
 
             cover_url = rom.get("path_cover_large") or rom.get("path_cover_small")
             if not cover_url:
+                artwork_no_url += 1
                 continue
 
             rom_id = rom["id"]
             existing = self.existing_cover_path(rom_id, grid)
             if existing:
                 cover_paths[rom_id] = existing
+                artwork_skipped += 1
                 continue
 
             staging = os.path.join(grid, f"romm_{rom_id}_cover.png")
             try:
                 await self._loop.run_in_executor(None, self._romm_api.download_cover, cover_url, staging)
                 cover_paths[rom_id] = staging
+                artwork_downloaded += 1
             except Exception as e:
+                artwork_failed += 1
                 self._logger.warning(f"Failed to download artwork for {rom['name']}: {e}")
 
+            # Periodic progress log
+            if (i + 1) % log_interval == 0:
+                self._logger.info(f"[Artwork] {i + 1}/{total} processed (downloaded={artwork_downloaded}, skipped={artwork_skipped}, failed={artwork_failed})")
+
+        self._logger.info(f"[Artwork] Complete: {total} processed, {artwork_downloaded} downloaded, {artwork_skipped} skipped, {artwork_no_url} no URL, {artwork_failed} failed")
         return cover_paths
 
     # ── Artwork finalisation ───────────────────────────────────────────────

@@ -480,6 +480,9 @@ class Plugin:
     async def get_sync_progress(self):
         return self._sync_service.get_sync_progress()
 
+    async def get_perf_report(self):
+        return self._sync_service.get_perf_report()
+
     async def sync_heartbeat(self):
         return self._sync_service.sync_heartbeat()
 
