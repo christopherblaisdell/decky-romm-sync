@@ -35,14 +35,33 @@ These platforms exercise:
 
 ## Representative Collections
 
-Collections are fetched as a single list (~101 items). The sync fetches the full collection list in one call — no per-collection ROM fetching is needed for the perf test.
+These 8 collections were selected to cover the full range of sizes. Collections trigger per-collection ROM fetches, so larger collections add real pagination load.
+
+| Collection                 | ROMs | Tier         | Why Included                                  |
+|----------------------------|------|--------------|-----------------------------------------------|
+| Best of Metroid            | 11   | Tiny         | Single-page fetch, franchise collection       |
+| Best of Castlevania        | 23   | Small        | Small multi-franchise, quick pagination       |
+| Best of Nintendo 64        | 42   | Small-Medium | Single-platform "best of"                     |
+| Best of SNES               | 101  | Medium       | Moderate pagination (~2 pages)                |
+| Best of Wii                | 115  | Medium       | Disc-based platform collection                |
+| Best of PS2                | 185  | Large        | Heaviest single-platform collection           |
+| Best of RPGs               | 248  | Large        | Cross-platform genre, heavy pagination (~5 pages) |
+| Best of Xbox 360           | 384  | Extra-Large  | Largest collection, stress test (~8 pages)    |
+
+**Total: ~1,109 ROMs across 8 collections** (some overlap with platform ROMs is expected).
+
+These collections exercise:
+- Per-collection ROM fetching at varying depths (1 to 8 pages)
+- Single-platform vs. cross-platform genre collections
+- Overlap deduplication (ROMs already seen via platform sync)
 
 ## Test Procedure
 
 1. Open Game Mode on Steam Deck
 2. Press `...` (QAM) → decky-romm-sync
-3. Sync each representative platform one at a time
-4. After each sync, retrieve perf data:
+3. Enable the 5 representative platforms and 8 representative collections
+4. Run a sync
+5. After the sync completes, retrieve perf data:
    - **From Decky logs:** `ssh deck@192.168.0.84 "echo comcast | sudo -S journalctl -u plugin_loader.service --no-pager -n 50"`
    - **From saved JSON:** `scp deck@192.168.0.84:~/homebrew/plugins/decky-romm-sync/perf_report.json .`
    - **Via RPC:** Call `get_perf_report()` from the frontend
@@ -50,7 +69,7 @@ Collections are fetched as a single list (~101 items). The sync fetches the full
 ## What This Measures
 
 - Platform and ROM metadata fetch time (API latency + pagination)
-- Collection list fetch time
+- Per-collection ROM fetch time and pagination depth
 - HTTP request count and total bytes transferred
 - Per-phase timing breakdown (fetch_platforms, fetch_roms, fetch_collections, prepare_shortcuts, cache_metadata, artwork_download)
 - Error and retry counts
